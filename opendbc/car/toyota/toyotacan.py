@@ -155,6 +155,27 @@ def create_ui_command(packer, steer, chime, left_line, right_line, left_lane_dep
   return packer.make_can_msg("LKAS_HUD", 0, values)
 
 
+def create_rsa_commands(speed_limit_mph: int, syncid: int):
+  """RSA cluster speed-limit sign frames, byte-matched to the camera's own output
+  (measured on a 2023 Highlander). Built as raw payloads so the constant fields the
+  cluster expects (e.g. byte5=0x20) are reproduced exactly, not inferred from the DBC.
+
+  speed_limit_mph: rounded mph limit to display on the cluster, or 0 to blank the sign.
+  syncid: 1..15 rolling counter, advanced once per send (the cluster rejects a frozen one).
+  """
+  s1 = syncid & 0xF                    # RSA1 SYNCID1
+  s2 = (syncid % 15 + 1) & 0xF         # RSA2 SYNCID2 runs one ahead of RSA1 (matches camera)
+  if speed_limit_mph > 0:
+    # TSGN1=0x24 (mph speed sign), SPDVAL1=mph, byte5=0x20 constant; RSA2 marks a sign present
+    rsa1 = bytes([0x24, 0x00, speed_limit_mph & 0xFF, 0x00, 0x00, 0x20, 0x00, s1])
+    rsa2 = bytes([0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x4D, 0x80 | s2])
+  else:
+    # no sign: TSGN1=0 / no sign-present marker (SPDUNT=2 kept in byte7 as the camera does)
+    rsa1 = bytes([0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00, s1])
+    rsa2 = bytes([0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80 | s2])
+  return [(0x489, rsa1, 0), (0x48A, rsa2, 0)]
+
+
 def toyota_checksum(address: int, sig, d: bytearray) -> int:
   s = len(d)
   addr = address

@@ -44,10 +44,13 @@ inline void m_mads_state_init(void) {
   m_mads_state.is_vehicle_moving = NULL;
   m_mads_state.acc_main.current = NULL;
   m_mads_state.mads_button.current = MADS_BUTTON_UNAVAILABLE;
+  // discard any unconsumed button pulse so a state re-init cannot re-latch it as a fresh rising edge
+  mads_button_press = MADS_BUTTON_UNAVAILABLE;
 
   m_mads_state.system_enabled = false;
   m_mads_state.disengage_lateral_on_brake = false;
   m_mads_state.pause_lateral_on_brake = false;
+  m_mads_state.main_cruise_keep_lateral = false;
 
   m_mads_state.acc_main.previous = false;
   m_mads_state.acc_main.transition = MADS_EDGE_NO_CHANGE;
@@ -90,8 +93,17 @@ inline void m_update_control_state(void) {
     m_mads_state.controls_requested_lateral = true;
   }
 
+  // A physical button press is fresh driver intent: give the heartbeat a full window to catch up,
+  // closing the race where a re-press lands just before a pending heartbeat revoke
+  if (m_mads_state.mads_button.transition == MADS_EDGE_RISING) {
+    heartbeat_engaged_mads_mismatches = 0U;
+  }
+
   // Primary control blockers - these prevent any further control processing
-  if (m_mads_state.acc_main.transition == MADS_EDGE_FALLING) {
+  // ACC main off revokes lateral only when main cruise is coupled to MADS. With
+  // main_cruise_keep_lateral, main cruise governs longitudinal only and lateral is left
+  // to the button/brake — turning ACC off no longer disengages steering.
+  if (!m_mads_state.main_cruise_keep_lateral && (m_mads_state.acc_main.transition == MADS_EDGE_FALLING)) {
     mads_exit_controls(MADS_DISENGAGE_REASON_ACC_MAIN_OFF);
     allowed = false;  // No matter what, no further control processing on this cycle
   }
@@ -152,8 +164,11 @@ inline void mads_set_alternative_experience(const int *mode) {
   const bool mads_enabled = (*mode & ALT_EXP_ENABLE_MADS) != 0;
   const bool disengage_lateral_on_brake = (*mode & ALT_EXP_MADS_DISENGAGE_LATERAL_ON_BRAKE) != 0;
   const bool pause_lateral_on_brake = (*mode & ALT_EXP_MADS_PAUSE_LATERAL_ON_BRAKE) != 0;
+  const bool main_cruise_keep_lateral = (*mode & ALT_EXP_MADS_MAIN_CRUISE_KEEP_LATERAL) != 0;
 
+  // mads_set_system_state re-inits the state (clearing the flag), so apply it after
   mads_set_system_state(mads_enabled, disengage_lateral_on_brake, pause_lateral_on_brake);
+  m_mads_state.main_cruise_keep_lateral = main_cruise_keep_lateral;
 }
 
 extern inline void mads_set_system_state(const bool enabled, const bool disengage_lateral_on_brake, const bool pause_lateral_on_brake) {

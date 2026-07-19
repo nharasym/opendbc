@@ -19,7 +19,7 @@ from opendbc.sunnypilot.car.hyundai.longitudinal.helpers import LongitudinalTuni
 from opendbc.sunnypilot.car.hyundai.values import HyundaiFlagsSP
 from opendbc.sunnypilot.car.subaru.values_ext import SubaruFlagsSP, SubaruSafetyFlagsSP
 from opendbc.sunnypilot.car.tesla.values import TeslaFlagsSP
-from opendbc.sunnypilot.car.toyota.values import ToyotaFlagsSP
+from opendbc.sunnypilot.car.toyota.values import ToyotaFlagsSP, ToyotaSafetyFlagsSP
 
 
 class LatControlInputs(NamedTuple):
@@ -137,6 +137,7 @@ def _initialize_toyota(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params
   if CP.brand == 'toyota':
     toyota_stock_long = int(params_dict.get("ToyotaEnforceStockLongitudinal", 0)) == 1
     toyota_stop_and_go_hack = int(params_dict.get("ToyotaStopAndGoHack", 0)) == 1
+    toyota_rsa_cluster = int(params_dict.get("ToyotaRsaClusterSign", 0)) == 1
 
     if toyota_stock_long:
       CP_SP.flags |= ToyotaFlagsSP.STOCK_LONGITUDINAL.value
@@ -146,3 +147,10 @@ def _initialize_toyota(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params
 
     if toyota_stop_and_go_hack and CP.openpilotLongitudinalControl:
       CP_SP.flags |= ToyotaFlagsSP.STOP_AND_GO_HACK.value
+
+    # experimental: drive the cluster's RSA speed-limit sign from the resolved (camera+OSM)
+    # limit. CP_SP.flags gates the carcontroller TX; safetyParam gates the panda so it blocks
+    # the camera's RSA copies only while we transmit.
+    if toyota_rsa_cluster:
+      CP_SP.flags |= ToyotaFlagsSP.RSA_CLUSTER.value
+      CP_SP.safetyParam |= ToyotaSafetyFlagsSP.RSA_CLUSTER

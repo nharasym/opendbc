@@ -19,10 +19,10 @@ def _build_libsafety() -> str:
     '-Wall', '-Wextra', '-Werror', '-nostdlib', '-fno-builtin',
     '-std=gnu11', '-Wfatal-errors', '-Wno-pointer-to-int-cast',
     '-g', '-O0', '-fno-omit-frame-pointer', '-DALLOW_DEBUG',
+    '-fsanitize=undefined', '-fno-sanitize-recover=undefined',
     '-fprofile-arcs', '-ftest-coverage',
   ]
   ldflags = [
-    '-fsanitize=undefined', '-fno-sanitize-recover=undefined',
     '-fprofile-arcs', '-ftest-coverage',
   ]
 
@@ -133,6 +133,7 @@ int mads_get_current_disengage_reason(void);
 int get_temp_debug(void);
 uint32_t get_acc_main_on_mismatches(void);
 void set_mads_params(bool enable_mads, bool disengage_lateral_on_brake, bool pause_lateral_on_brake);
+void set_mads_main_cruise_keep_lateral(bool keep);
 void mads_apply_alternative_experience(int mode);
 void tick_mads_state(bool vm, bool acc_main, bool op_allowed, bool braking, bool steering_disengage);
 void set_heartbeat_engaged_mads(bool c);

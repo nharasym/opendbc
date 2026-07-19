@@ -10,6 +10,11 @@
   TOYOTA_BASE_TX_MSGS \
   {0x2E4, 0, 5, .check_relay = true}, \
   {0x343, 0, 8, .check_relay = false},  /* ACC cancel cmd */  \
+  /* RSA cluster speed-limit sign (experimental, gated on TOYOTA_PARAM_SP_RSA_CLUSTER): */ \
+  /* disable_static_blocking so the camera's RSA still forwards when the feature is off — */ \
+  /* toyota_fwd_hook blocks the camera copies only while we are transmitting. */ \
+  {0x489, 0, 8, .check_relay = true, .disable_static_blocking = true}, \
+  {0x48A, 0, 8, .check_relay = true, .disable_static_blocking = true}, \
 
 #define TOYOTA_COMMON_SECOC_TX_MSGS \
   TOYOTA_BASE_TX_MSGS \
@@ -39,6 +44,9 @@
 #define TOYOTA_COMMON_RX_CHECKS(lta)                                                                                                       \
   {.msg = {{ 0xaa, 0, 8, 83U, .ignore_checksum = true, .ignore_counter = true}, { 0 }, { 0 }}},      \
   {.msg = {{0x260, 0, 8, 50U, .ignore_counter = true, .ignore_quality_flag=!(lta)}, { 0 }, { 0 }}},  \
+  /* MADS: LDA/LKAS button presses arrive via the camera's LKAS_HUD, which has no fixed rate (~1Hz + on change), */                         \
+  /* so it is exempt from both frequency and liveness enforcement: a silent camera must never block controls */                            \
+  {.msg = {{0x412, 2, 8, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true, .frequency = 1U, .ignore_frequency_check = true, .ignore_lag_check = true}, { 0 }, { 0 }}},  \
 
 #define TOYOTA_RX_CHECKS(lta)                                                                                                               \
   TOYOTA_COMMON_RX_CHECKS(lta)                                                                                                              \
@@ -69,6 +77,20 @@ static bool toyota_secoc = false;
 static bool toyota_alt_brake = false;
 static bool toyota_stock_longitudinal = false;
 static bool toyota_lta = false;
+// experimental: openpilot drives the cluster's RSA speed-limit sign from the resolved
+// (camera + OSM) limit. When set, toyota_fwd_hook blocks the camera's RSA copies so ours
+// replace them; when clear, the camera's RSA forwards untouched and we transmit nothing.
+static bool toyota_rsa_cluster = false;
+// LDA_ON_MESSAGE is a 2-bit signal; 0xFF marks the change-tracker as unsynced so the
+// first sample after (re)init only establishes a baseline and can never count as a press
+static uint8_t toyota_last_lda_on_message = 0xFFU;
+// the camera autonomously clears LDA_ON_MESSAGE to 0 exactly 6.0s after the last press
+// (measured); a drop to 0 later than this window is that timeout, not a driver press
+#define TOYOTA_LDA_PRESS_WINDOW_US 5500000U
+static uint32_t toyota_last_lda_transition_ts = 0;
+// true while the current MADS_BUTTON_PRESSED pulse was set by the LDA decode below:
+// only pulses we own are auto-cleared on the next rx (externally-set state is not ours)
+static bool toyota_lda_button_pulse = false;
 static int toyota_dbc_eps_torque_factor = 100;   // conversion factor for STEER_TORQUE_EPS in %: see dbc file
 
 static uint32_t toyota_compute_checksum(const CANPacket_t *msg) {
@@ -112,6 +134,15 @@ static int TOYOTA_GET_INTERCEPTOR(const CANPacket_t *msg) {
 }
 
 static void toyota_rx_hook(const CANPacket_t *msg) {
+  // a button pulse lasts exactly one processed message: clear it on the next rx of any
+  // address so back-to-back press transitions (every LDA value change is a press) each
+  // form a distinct rising edge for the MADS layer — without this, the pulse persists
+  // until the next 0x412 (~1s) and a rapid second press cannot produce a new edge
+  if (toyota_lda_button_pulse && (mads_button_press == MADS_BUTTON_PRESSED)) {
+    mads_button_press = MADS_BUTTON_NOT_PRESSED;
+    toyota_lda_button_pulse = false;
+  }
+
   if (msg->bus == 0U) {
 
     // get eps motor torque (0.66 factor in dbc)
@@ -209,6 +240,39 @@ static void toyota_rx_hook(const CANPacket_t *msg) {
 
       gas_interceptor_prev = gas_interceptor;
     }
+  }
+
+  // MADS: the LDA/LKAS button is wired to the camera, which reports presses via
+  // LKAS_HUD.LDA_ON_MESSAGE. Measured on-car (2023 Highlander): the value toggles
+  // between 0 and 1 on EVERY press (2 never appears), and the camera autonomously
+  // clears it to 0 exactly 6.0s after the last press. So every value CHANGE is one
+  // driver press, EXCEPT a drop to 0 arriving beyond the press window — that is the
+  // camera's timeout, and counting it would phantom-toggle steering 6s after a press.
+  // Mirror each press as a single-message button pulse for the MADS lateral grant.
+  // The first sample after (re)init only sets the baseline (a stale value must not
+  // register as a press; the transition clock starts expired so a stale banner's
+  // timeout drop right after init cannot count either). A press counts regardless of
+  // ACC main: the physical button is fresh driver intent and stock LTA has no
+  // main-cruise requirement (openpilot mirrors this with allow_always); the acc_main
+  // FALLING edge still revokes lateral in the generic MADS layer (master off switch).
+  // openpilot's carstate applies the identical rule — the two layers must stay in
+  // lockstep or the permission layers desync (EPS starvation).
+  if ((msg->bus == 2U) && (msg->addr == 0x412U)) {
+    const uint8_t lda_on_message = (uint8_t)((msg->data[3] >> 6U) & 0x3U);
+    const bool first_sample = (toyota_last_lda_on_message == 0xFFU);
+    const uint32_t ts = microsecond_timer_get();
+    bool pressed = false;
+    if (first_sample) {
+      toyota_last_lda_transition_ts = ts - TOYOTA_LDA_PRESS_WINDOW_US;
+    } else if (lda_on_message != toyota_last_lda_on_message) {
+      const uint32_t elapsed = safety_get_ts_elapsed(ts, toyota_last_lda_transition_ts);
+      pressed = (lda_on_message != 0U) || (elapsed < TOYOTA_LDA_PRESS_WINDOW_US);
+      toyota_last_lda_transition_ts = ts;
+    } else {
+    }
+    mads_button_press = pressed ? MADS_BUTTON_PRESSED : MADS_BUTTON_NOT_PRESSED;
+    toyota_lda_button_pulse = pressed;
+    toyota_last_lda_on_message = lda_on_message;
   }
 }
 
@@ -397,7 +461,25 @@ static bool toyota_tx_hook(const CANPacket_t *msg) {
     }
   }
 
+  // RSA cluster signs are display-only (no actuation) and only transmit with the feature on
+  if ((msg->addr == 0x489U) || (msg->addr == 0x48AU)) {
+    if (!toyota_rsa_cluster) {
+      tx = false;
+    }
+  }
+
   return tx;
+}
+
+// Block the camera's own RSA copies from reaching the cluster only while we are driving
+// it ourselves; when the feature is off, the camera's RSA forwards normally (the TX
+// entries set disable_static_blocking, so static blocking never fires for these addrs).
+static bool toyota_fwd_hook(int bus_num, int addr) {
+  bool block_msg = false;
+  if ((bus_num == 2) && toyota_rsa_cluster) {
+    block_msg = (addr == 0x489) || (addr == 0x48A);
+  }
+  return block_msg;
 }
 
 static safety_config toyota_init(uint16_t param) {
@@ -432,6 +514,7 @@ static safety_config toyota_init(uint16_t param) {
 
   const uint16_t TOYOTA_PARAM_SP_UNSUPPORTED_DSU = 1;
   const uint16_t TOYTOA_PARAM_SP_GAS_INTERCEPTOR = 2;
+  const uint16_t TOYOTA_PARAM_SP_RSA_CLUSTER = 4;
 
 #ifdef ALLOW_DEBUG
   const uint32_t TOYOTA_PARAM_SECOC = 8UL << TOYOTA_PARAM_OFFSET;
@@ -443,8 +526,15 @@ static safety_config toyota_init(uint16_t param) {
   toyota_lta = GET_FLAG(param, TOYOTA_PARAM_LTA);
   toyota_dbc_eps_torque_factor = param & TOYOTA_EPS_FACTOR;
 
+  // reset MADS button tracking so a stale press cannot carry across a safety mode (re)init
+  toyota_last_lda_on_message = 0xFFU;
+  toyota_last_lda_transition_ts = 0;
+  toyota_lda_button_pulse = false;
+  mads_button_press = MADS_BUTTON_UNAVAILABLE;
+
   const bool toyota_unsupported_dsu = GET_FLAG(current_safety_param_sp, TOYOTA_PARAM_SP_UNSUPPORTED_DSU);
   enable_gas_interceptor = GET_FLAG(current_safety_param_sp, TOYTOA_PARAM_SP_GAS_INTERCEPTOR);
+  toyota_rsa_cluster = GET_FLAG(current_safety_param_sp, TOYOTA_PARAM_SP_RSA_CLUSTER);
 
   // gas interceptor should not be used if openpilot is not controlling longitudinal or is a TSK car
   if (toyota_stock_longitudinal || toyota_secoc) {
@@ -570,6 +660,7 @@ const safety_hooks toyota_hooks = {
   .init = toyota_init,
   .rx = toyota_rx_hook,
   .tx = toyota_tx_hook,
+  .fwd = toyota_fwd_hook,
   .get_checksum = toyota_get_checksum,
   .compute_checksum = toyota_compute_checksum,
   .get_quality_flag_valid = toyota_get_quality_flag_valid,
