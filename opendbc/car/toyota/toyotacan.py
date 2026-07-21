@@ -164,7 +164,15 @@ def create_rsa_commands(speed_limit_mph: int, syncid: int):
   syncid: 1..15 rolling counter, advanced once per send (the cluster rejects a frozen one).
   """
   s1 = syncid & 0xF                    # RSA1 SYNCID1
-  s2 = (syncid % 15 + 1) & 0xF         # RSA2 SYNCID2 runs one ahead of RSA1 (matches camera)
+  # HL-FIX(rsa-syncid): was (syncid % 15 + 1), i.e. SYNCID2 one ahead of SYNCID1, with a comment
+  # claiming that matched the camera. It does not. Pairing each camera 0x489 to its nearest 0x48A
+  # over route 0000000e--3dd29726fe: (SYNCID2 - SYNCID1) mod 16 == 0 for 1990/1990 frames (100.0%),
+  # e.g. 0x489 ...00 0e paired with 0x48A ...08 8e. Ours ran +1 (93.4%) and never 0. The two halves
+  # therefore never paired and the cluster discarded the sign. This only became visible after the
+  # byte6 0x4D->0x08 fix: before that the cluster ignored us and held a stale value; after it, the
+  # cluster parsed the pair, found mismatched counters, and blanked the sign entirely.
+  # Revert = restore (syncid % 15 + 1) & 0xF.
+  s2 = s1                              # RSA2 SYNCID2 is identical to SYNCID1 (matches camera)
   if speed_limit_mph > 0:
     # TSGN1=0x24 (mph speed sign), SPDVAL1=mph, byte5=0x20 constant; RSA2 byte6 marks the sign type.
     # HL-FIX(rsa-sign-type): byte6 was 0x4D, which is NOT the ordinary speed-limit marker. Decoded
