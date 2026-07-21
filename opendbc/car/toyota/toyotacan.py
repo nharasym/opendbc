@@ -166,9 +166,20 @@ def create_rsa_commands(speed_limit_mph: int, syncid: int):
   s1 = syncid & 0xF                    # RSA1 SYNCID1
   s2 = (syncid % 15 + 1) & 0xF         # RSA2 SYNCID2 runs one ahead of RSA1 (matches camera)
   if speed_limit_mph > 0:
-    # TSGN1=0x24 (mph speed sign), SPDVAL1=mph, byte5=0x20 constant; RSA2 marks a sign present
+    # TSGN1=0x24 (mph speed sign), SPDVAL1=mph, byte5=0x20 constant; RSA2 byte6 marks the sign type.
+    # HL-FIX(rsa-sign-type): byte6 was 0x4D, which is NOT the ordinary speed-limit marker. Decoded
+    # from the camera's own frames on route 0000000c--69344c4094 (n=2117, 0x489 paired to 0x48A):
+    #   1204x  TSGN1=0x24 b1=0x00 b6=0x08   normal speed-limit sign
+    #    739x  TSGN1=0x24 b1=0x01 b6=0x08   normal speed-limit sign
+    #    148x  TSGN1=0x24 b1=0xa0 b6=0x4D   a DIFFERENT sign category, 95 of whose 132 samples carry
+    #                                       an implausible "5 mph" value - not a plain speed limit
+    # 0x08 is 92% of the camera's output; the original capture evidently sampled one of the 148
+    # special frames and generalised it. We emitted 0x4D on every frame, so the cluster never
+    # rendered our value and held its last genuine camera reading (observed: dash stuck at 25 mph
+    # for a whole drive while we transmitted 25/35/60/50/35/25/20).
+    # Revert = restore 0x4D below.
     rsa1 = bytes([0x24, 0x00, speed_limit_mph & 0xFF, 0x00, 0x00, 0x20, 0x00, s1])
-    rsa2 = bytes([0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x4D, 0x80 | s2])
+    rsa2 = bytes([0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x08, 0x80 | s2])
   else:
     # no sign: TSGN1=0 / no sign-present marker (SPDUNT=2 kept in byte7 as the camera does)
     rsa1 = bytes([0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00, s1])
