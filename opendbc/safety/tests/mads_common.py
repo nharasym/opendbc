@@ -60,9 +60,67 @@ class MadsSafetyTestBase(unittest.TestCase):
         self.safety.set_mads_params(enable_mads, False, False)
         self.assertEqual(enable_mads, self.safety.get_enable_mads())
 
+        self._prep_mads_button_grant_path()
         self._rx(self._lkas_button_msg(True))
         self._rx(self._lkas_button_msg(False))
         self.assertEqual(enable_mads, self.safety.get_controls_allowed_lateral())
+
+  def _prep_mads_button_grant_path(self):
+    # brands may override (e.g. Toyota needs ACC main on and a baseline sample for the LDA button)
+    pass
+
+  # False for brands whose rx hook only latches MADS_BUTTON_PRESSED and never releases it
+  # (e.g. Subaru): without release, repeat presses cannot produce fresh rising edges
+  MADS_BUTTON_PRESS_EDGES = True
+
+  def test_mads_button_press_resets_heartbeat_mismatch_counter(self):
+    """A physical button press grants a fresh heartbeat window instead of inheriting stale mismatches"""
+    try:
+      self._lkas_button_msg(False)
+    except NotImplementedError as err:
+      raise unittest.SkipTest("Skipping test because MADS button is not supported") from err
+    if not self.MADS_BUTTON_PRESS_EDGES:
+      raise unittest.SkipTest("brand's MADS button latches without release; repeat press edges impossible")
+
+    self.safety.set_mads_params(True, False, False)
+    self._prep_mads_button_grant_path()
+    self._rx(self._lkas_button_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    # accumulate two heartbeat mismatches (below the 3-strike revoke threshold)
+    self.safety.set_heartbeat_engaged_mads(False)
+    for _ in range(2):
+      self.safety.mads_heartbeat_engaged_check()
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    # a fresh physical press must reset the strike counter...
+    self._rx(self._lkas_button_msg(False))
+    self._rx(self._lkas_button_msg(True))
+    for _ in range(2):
+      self.safety.mads_heartbeat_engaged_check()
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    # ...while the revoke itself still fires after 3 consecutive mismatches
+    self.safety.mads_heartbeat_engaged_check()
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+  def test_mads_state_init_clears_stale_button_pulse(self):
+    """A MADS state re-init must clear a latched button pulse so it cannot re-grant lateral"""
+    try:
+      self._lkas_button_msg(False)
+    except NotImplementedError as err:
+      raise unittest.SkipTest("Skipping test because MADS button is not supported") from err
+
+    self.safety.set_mads_params(True, False, False)
+    self._prep_mads_button_grant_path()
+    self._rx(self._lkas_button_msg(True))  # press latched into mads_button_press
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    # re-init with the pulse still latched: it must not survive as a fresh press
+    self.safety.set_acc_main_on(False)
+    self.safety.set_mads_params(True, False, False)
+    self._rx(self._speed_msg(0))
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
 
   def test_enable_control_allowed_with_manual_acc_main_on_state(self):
     try:
@@ -181,6 +239,8 @@ class MadsSafetyTestBase(unittest.TestCase):
           with self.subTest("pause_lateral_on_brake", pause_lateral_on_brake=pause_lateral_on_brake):
             with self.subTest(engage_method):
               self.safety.set_mads_params(enable_mads, False, pause_lateral_on_brake)
+              if engage_method == "mads_button":
+                self._prep_mads_button_grant_path()
 
               # Brake press rising edge
               self._rx(self._user_brake_msg(True))
@@ -273,6 +333,7 @@ class MadsSafetyTestBase(unittest.TestCase):
     for enable_mads in (True, False):
       with self.subTest("enable_mads", enable_mads=enable_mads):
         self.safety.set_mads_params(enable_mads, False, False)
+        self._prep_mads_button_grant_path()
 
         self._rx(self._lkas_button_msg(True))
         self._rx(self._lkas_button_msg(False))
