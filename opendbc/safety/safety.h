@@ -330,7 +330,8 @@ void safety_tick(const safety_config *cfg) {
       // 2s of lag is worse case, since the function is called at 1Hz
       uint32_t frequency = cfg->rx_checks[i].msg[cfg->rx_checks[i].status.index].frequency;
       uint32_t timestep = 1e6 / frequency;
-      bool lagging = elapsed_time > SAFETY_MAX(timestep * MAX_MISSED_MSGS, 1e6);
+      bool ignore_lag_check = cfg->rx_checks[i].msg[cfg->rx_checks[i].status.index].ignore_lag_check;
+      bool lagging = !ignore_lag_check && (elapsed_time > SAFETY_MAX(timestep * MAX_MISSED_MSGS, 1e6));
       cfg->rx_checks[i].status.lagging = lagging;
       if (lagging) {
         controls_allowed = false;
@@ -339,7 +340,9 @@ void safety_tick(const safety_config *cfg) {
 
       // enforce minimum frequency for safety-relevant messages
       bool frequency_invalid = !cfg->rx_checks[i].msg[cfg->rx_checks[i].status.index].ignore_frequency_check && (frequency < 10U);
-      if (lagging || frequency_invalid || !is_msg_valid(cfg->rx_checks, i)) {
+      // liveness-exempt entries (event-ish messages) must not block on having simply never been received
+      bool never_seen_exempt = ignore_lag_check && !cfg->rx_checks[i].status.msg_seen;
+      if (lagging || frequency_invalid || (!never_seen_exempt && !is_msg_valid(cfg->rx_checks, i))) {
         rx_checks_invalid = true;
         controls_allowed = false;
       }

@@ -309,6 +309,15 @@ void set_mads_params(bool enable_mads, bool disengage_lateral_on_brake, bool pau
   mads_set_alternative_experience(&alternative_experience);
 }
 
+void set_mads_main_cruise_keep_lateral(bool keep){
+  if (keep) {
+    alternative_experience |= ALT_EXP_MADS_MAIN_CRUISE_KEEP_LATERAL;
+  } else {
+    alternative_experience &= ~ALT_EXP_MADS_MAIN_CRUISE_KEEP_LATERAL;
+  }
+  mads_set_alternative_experience(&alternative_experience);
+}
+
 void set_heartbeat_engaged_mads(bool c){
   heartbeat_engaged_mads = c;
 }
