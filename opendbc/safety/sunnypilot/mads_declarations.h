@@ -41,6 +41,10 @@ typedef enum __attribute__((packed)) {
 #define ALT_EXP_ENABLE_MADS 1024
 #define ALT_EXP_MADS_DISENGAGE_LATERAL_ON_BRAKE 2048
 #define ALT_EXP_MADS_PAUSE_LATERAL_ON_BRAKE 4096
+// when set, turning ACC main off does NOT revoke MADS lateral (main cruise controls
+// only longitudinal; the LDA/LKAS button remains the lateral control). Default off
+// preserves the "main cruise is a master off switch" behavior for every other config.
+#define ALT_EXP_MADS_MAIN_CRUISE_KEEP_LATERAL 8192
 
 #define MISMATCH_DEFAULT_THRESHOLD 25
 
@@ -79,6 +83,7 @@ typedef struct {
   bool system_enabled : 1;
   bool disengage_lateral_on_brake : 1;
   bool pause_lateral_on_brake : 1;
+  bool main_cruise_keep_lateral : 1;
   bool controls_requested_lateral : 1;
 } MADSState;
 

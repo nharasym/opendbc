@@ -94,6 +94,197 @@ class TestToyotaSafetyBase(common.CarSafetyTest, common.LongitudinalAccelSafetyT
     values = {"MAIN_ON": enabled}
     return self.packer.make_can_msg_safety(msg, 0, values)
 
+  def _lkas_button_msg(self, enabled):
+    # The LDA/LKAS button is wired to the camera: LKAS_HUD.LDA_ON_MESSAGE toggles on
+    # EVERY press (with a 6s autonomous clear), so the safety code counts each value
+    # transition inside the press window as one press. enabled=True sends a genuine new
+    # press (alternating nonzero value); enabled=False re-sends the current value, which
+    # registers the button release (NOT_PRESSED) without being a press.
+    if enabled:
+      self._lda_value = 2 if getattr(self, "_lda_value", 2) == 1 else 1
+      value = self._lda_value
+    else:
+      value = getattr(self, "_lda_value", 0)
+    return self.packer.make_can_msg_safety("LKAS_HUD", 2, {"LDA_ON_MESSAGE": value})
+
+  def _prep_lda_button_grant_path(self):
+    """Baseline the LDA change tracker and consume the acc_main rising-edge grant so that
+    any subsequent grant is attributable to the button under test. (The button itself
+    grants regardless of ACC main — see test_lda_button_grants_without_acc_main — but the
+    common MADS tests run with main on, so its rising-edge grant must be consumed here.)"""
+    self.safety.set_acc_main_on(True)
+    self._rx(self._speed_msg(0))  # consume the acc_main rising edge (may grant)
+    self._rx(self._lkas_button_msg(False))  # baseline the LDA change tracker
+    self.safety.set_controls_allowed_lateral(False)
+    self.safety.set_controls_requested_lateral(False)
+
+  # the common MADS button tests use this hook for the same preparation
+  _prep_mads_button_grant_path = _prep_lda_button_grant_path
+
+  def test_lkas_hud_never_seen_is_harmless(self):
+    """A LKAS_HUD (0x412) that is NEVER received must not lag out controls at safety_tick.
+    Covers the never_seen exemption in safety_tick: without it, the very first tick more
+    than 10s after init would block all controls before the camera's first message."""
+    # no 0x412 is ever received in this test; keep every other checked message fresh
+    self.safety.set_timer(int(12 * 1e6))
+    fresh = [self._speed_msg(0), self._torque_meas_msg(0), self._pcm_status_msg(False),
+             self._user_gas_msg(False), self._user_brake_msg(False), self._acc_state_msg(False)]
+    if isinstance(self, GasInterceptorSafetyTest):
+      fresh.append(self._interceptor_user_gas(0))
+    for msg in fresh:
+      self._rx(msg)
+
+    self.safety.set_controls_allowed(True)
+    self.safety.set_controls_allowed_lateral(True)
+    self.safety.safety_tick_current_safety_config()
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    # note: safety_config_valid() is not asserted here — the test-harness helper requires
+    # msg_seen on every entry by design; the firmware effect under test is controls survival
+
+  def test_lda_button_change_counts_as_press(self):
+    """Every LDA_ON_MESSAGE change is one press: to-nonzero always, to-zero when inside
+    the press window (each press toggles the value down as often as up); repeats are not.
+    Measured on-car: the value toggles 0<->1 per press — change-to-nonzero-only detection
+    silently dropped every second press of a fast sequence."""
+    self.safety.set_mads_params(True, False, False)
+    self._prep_lda_button_grant_path()
+
+    def lda_msg(value):
+      return self.packer.make_can_msg_safety("LKAS_HUD", 2, {"LDA_ON_MESSAGE": value})
+
+    # first press: 0 -> 1 grants lateral
+    self._rx(lda_msg(1))
+    self.assertEqual(1, self.safety.get_mads_button_press())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    # unchanged value is not a new press
+    self._rx(lda_msg(1))
+    self.assertEqual(0, self.safety.get_mads_button_press())
+
+    # next press toggles the value down: 1 -> 0 inside the window IS a press
+    self.safety.set_controls_allowed_lateral(False)
+    self.safety.set_controls_requested_lateral(False)
+    self._rx(lda_msg(0))
+    self.assertEqual(1, self.safety.get_mads_button_press())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    # and back up: 0 -> 1 is a press again. Interleave one ordinary message first, as the
+    # real bus always does between two LKAS_HUD frames — the button pulse clears on the
+    # next rx of any address, which is what lets consecutive presses form distinct edges
+    self._rx(self._speed_msg(0))
+    self.safety.set_controls_allowed_lateral(False)
+    self.safety.set_controls_requested_lateral(False)
+    self._rx(lda_msg(1))
+    self.assertEqual(1, self.safety.get_mads_button_press())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+  def test_lda_button_timeout_drop_is_not_a_press(self):
+    """The camera clears LDA_ON_MESSAGE to 0 by itself exactly 6.0s after the last press
+    (measured); that autonomous drop must never count — counting it would phantom-toggle
+    steering 6 seconds after every press"""
+    self.safety.set_mads_params(True, False, False)
+    self._prep_lda_button_grant_path()
+    self._rx(self.packer.make_can_msg_safety("LKAS_HUD", 2, {"LDA_ON_MESSAGE": 1}))
+    self.assertEqual(1, self.safety.get_mads_button_press())
+
+    # 6.0s later the camera clears the value autonomously: beyond the window, not a press
+    self.safety.set_timer(int(6.0 * 1e6))
+    self.safety.set_controls_allowed_lateral(False)
+    self.safety.set_controls_requested_lateral(False)
+    self._rx(self.packer.make_can_msg_safety("LKAS_HUD", 2, {"LDA_ON_MESSAGE": 0}))
+    self.assertEqual(0, self.safety.get_mads_button_press())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+  def test_lda_button_first_sample_is_baseline_only(self):
+    """A nonzero LDA_ON_MESSAGE as the first sample after init must never count as a press"""
+    self.safety.set_mads_params(True, False, False)
+    self.safety.set_acc_main_on(True)
+    self._rx(self._speed_msg(0))  # consume the acc_main rising edge grant
+    self.safety.set_controls_allowed_lateral(False)
+    self.safety.set_controls_requested_lateral(False)
+
+    # stale value from a press just before (re)init: baseline only, no grant
+    self._rx(self.packer.make_can_msg_safety("LKAS_HUD", 2, {"LDA_ON_MESSAGE": 1}))
+    self.assertEqual(0, self.safety.get_mads_button_press())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+    # the stale banner's own timeout drop shortly after init is not a press either:
+    # the transition clock starts expired at the baseline sample
+    self.safety.set_timer(int(1 * 1e6))
+    self._rx(self.packer.make_can_msg_safety("LKAS_HUD", 2, {"LDA_ON_MESSAGE": 0}))
+    self.assertEqual(0, self.safety.get_mads_button_press())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+  def test_lda_button_grants_without_acc_main(self):
+    """A physical LDA press must grant lateral even with ACC main off (stock-LTA parity:
+    the drive's first press must not depend on main being armed), while the acc_main
+    falling edge still revokes lateral — main stays a master off switch"""
+    self.safety.set_mads_params(True, False, False)
+    self._rx(self._lkas_button_msg(False))  # baseline after init, main never on
+    self._rx(self._lkas_button_msg(True))   # press with main off
+    self.assertEqual(1, self.safety.get_mads_button_press())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    # a repeat of the same LDA value is not a new press (no change edge)
+    self._rx(self.packer.make_can_msg_safety("LKAS_HUD", 2, {"LDA_ON_MESSAGE": self._lda_value}))
+    self.assertEqual(0, self.safety.get_mads_button_press())
+
+    # acc_main on -> off falling edge revokes the lateral grant (master off preserved)
+    self.safety.set_acc_main_on(True)
+    self._rx(self._speed_msg(0))
+    self.safety.set_acc_main_on(False)
+    self._rx(self._speed_msg(0))
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+  def test_main_cruise_keep_lateral_survives_acc_main_off(self):
+    """With MADS_MAIN_CRUISE_KEEP_LATERAL, turning ACC main off must NOT revoke lateral
+    (main cruise controls longitudinal only); the default (flag off) still revokes."""
+    # default: acc_main falling revokes (the coupled baseline)
+    self.safety.set_mads_params(True, False, False)
+    self._prep_lda_button_grant_path()
+    self._rx(self._lkas_button_msg(True))  # button grants lateral
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self.safety.set_acc_main_on(True)
+    self._rx(self._speed_msg(0))
+    self.safety.set_acc_main_on(False)
+    self._rx(self._speed_msg(0))
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+    # flag on: acc_main falling leaves lateral engaged
+    self.safety.set_mads_params(True, False, False)
+    self.safety.set_mads_main_cruise_keep_lateral(True)
+    self._prep_lda_button_grant_path()
+    self._rx(self._lkas_button_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self.safety.set_acc_main_on(True)
+    self._rx(self._speed_msg(0))
+    self.safety.set_acc_main_on(False)
+    self._rx(self._speed_msg(0))
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self.safety.set_mads_main_cruise_keep_lateral(False)
+
+  def test_lda_button_message_staleness_is_harmless(self):
+    """A silent camera LKAS_HUD must never invalidate RX state or block controls"""
+    self.safety.set_mads_params(True, False, False)
+    self._rx(self._lkas_button_msg(False))
+
+    for t in (int(1e6), int(12e6)):  # beyond the 10s lag threshold on the second pass
+      self.safety.set_timer(t)
+      # keep every other checked message fresh; 0x412 stays silent
+      fresh_msgs = [self._speed_msg(0), self._torque_meas_msg(0), self._pcm_status_msg(False),
+                    self._user_brake_msg(False), self._user_gas_msg(False), self._acc_state_msg(False)]
+      if isinstance(self, GasInterceptorSafetyTest):
+        fresh_msgs.append(self._interceptor_user_gas(0))
+      for msg in fresh_msgs:
+        self._rx(msg)
+      self.safety.set_controls_allowed(True)
+      self.safety.set_controls_allowed_lateral(True)
+      self.safety.safety_tick_current_safety_config()
+      self.assertTrue(self.safety.get_controls_allowed())
+      self.assertTrue(self.safety.get_controls_allowed_lateral())
+      self.assertTrue(self.safety.safety_config_valid())
+
   def test_diagnostics(self, stock_longitudinal: bool = False, ecu_disabled: bool = True):
     for should_tx, msg in ((False, b"\x6D\x02\x3E\x00\x00\x00\x00\x00"),  # fwdCamera tester present
                            (False, b"\x0F\x03\xAA\xAA\x00\x00\x00\x00"),  # non-tester present
