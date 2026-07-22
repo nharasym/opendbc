@@ -46,6 +46,8 @@ class TestSubaruSafetyBase(common.CarSafetyTest):
   RELAY_MALFUNCTION_ADDRS = {SUBARU_MAIN_BUS: (SubaruMsg.ES_LKAS, SubaruMsg.ES_DashStatus, SubaruMsg.ES_LKAS_State,
                                                SubaruMsg.ES_Infotainment)}
   FWD_BLACKLISTED_ADDRS = fwd_blacklisted_addr()
+  # subaru.h only latches MADS_BUTTON_PRESSED (never releases it), so repeat press edges don't exist
+  MADS_BUTTON_PRESS_EDGES = False
 
   MAX_RT_DELTA = 940
 
