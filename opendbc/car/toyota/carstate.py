@@ -20,6 +20,10 @@ SteerControlType = structs.CarParams.SteerControlType
 #     if using the other control command, goes directly to 3 after 1.5 seconds
 # - initializing: LTA can report 0 as long as STEER_TORQUE_SENSOR->STEER_ANGLE_INITIALIZING is 1,
 #     and is a catch-all for LKA
+# LDA_ON_MESSAGE clears itself to 0 exactly 6.0s after the last press (measured);
+# a drop to 0 later than this window is that timeout, not a driver press
+LDA_PRESS_WINDOW_NS = int(5.5e9)
+
 TEMP_STEER_FAULTS = (0, 9, 11, 21, 25)
 # - lka/lta msg drop out: 3 (recoverable)
 # - prolonged high driver torque: 17 (permanent)
@@ -47,6 +51,7 @@ class CarState(CarStateBase, CarStateExt):
     self.angle_offset = FirstOrderFilter(None, 60.0, DT_CTRL, initialized=False)
 
     self.lkas_button = 0
+    self.lkas_button_transition_ts = 0
     self.distance_button = 0
 
     self.pcm_follow_distance = 0
@@ -196,10 +201,19 @@ class CarState(CarStateBase, CarStateExt):
       prev_lkas_button = self.lkas_button
       self.lkas_button = cp_cam.vl["LKAS_HUD"]["LDA_ON_MESSAGE"]
 
-      # Cycles between 1 and 2 when pressing the button, then rests back at 0 after ~3s
-      if self.lkas_button != 0 and self.lkas_button != prev_lkas_button:
-        buttonEvents.extend(create_button_events(1, 0, {1: ButtonType.lkas}) +
-                            create_button_events(0, 1, {1: ButtonType.lkas}))
+      # LDA_ON_MESSAGE toggles between 0 and 1 on EVERY press (measured; it does not
+      # cycle 1<->2), and the camera autonomously clears it to 0 exactly 6.0s after the
+      # last press. Every value change is one press, EXCEPT a drop to 0 beyond the press
+      # window — that's the camera's timeout, and counting it would phantom-toggle
+      # steering 6s after a press. The panda LDA decode applies the identical rule
+      # (toyota.h) — the two layers must stay in lockstep.
+      if self.lkas_button != prev_lkas_button:
+        lda_ts = cp_cam.ts_nanos["LKAS_HUD"]["LDA_ON_MESSAGE"]
+        within_window = (lda_ts - self.lkas_button_transition_ts) < LDA_PRESS_WINDOW_NS
+        if self.lkas_button != 0 or within_window:
+          buttonEvents.extend(create_button_events(1, 0, {1: ButtonType.lkas}) +
+                              create_button_events(0, 1, {1: ButtonType.lkas}))
+        self.lkas_button_transition_ts = lda_ts
 
       if self.CP.carFingerprint not in (RADAR_ACC_CAR | SECOC_CAR):
         # distance button is wired to the ACC module (camera or radar)

@@ -11,6 +11,7 @@ from opendbc.car.toyota import toyotacan
 from opendbc.car.toyota.values import CAR, NO_STOP_TIMER_CAR, TSS2_CAR, \
                                         CarControllerParams, ToyotaFlags, \
                                         UNSUPPORTED_DSU_CAR
+from opendbc.car.common.conversions import Conversions as CV
 from opendbc.can import CANPacker
 
 from opendbc.sunnypilot.car.toyota.gas_interceptor import GasInterceptorCarController
@@ -36,6 +37,11 @@ MAX_STEER_RATE_FRAMES = 17  # tx control frames needed before torque can be cut
 
 # EPS allows user torque above threshold for 50 frames before permanently faulting
 MAX_USER_TORQUE = 500
+
+CRUISE_CANCEL_DELAY_FRAMES = 20
+# the PCM can keep CRUISE_ACTIVE up to ~1.5s after a brake press (hybrid brake blending),
+# so a force-cancel is only allowed after this much brake-free time
+BRAKE_CLEAR_MIN_FRAMES = 150
 
 
 def get_long_tune(CP, params):
@@ -64,6 +70,8 @@ class CarController(CarControllerBase, GasInterceptorCarController):
     self.permit_braking = True
     self.steer_rate_counter = 0
     self.distance_button = 0
+    # start clear: no recent brake at init, so openpilot-initiated cancels are not gated at boot
+    self.brake_clear_frames = BRAKE_CLEAR_MIN_FRAMES + 1
 
     # *** start long control state ***
     self.long_pid = get_long_tune(self.CP, self.params)
@@ -86,7 +94,14 @@ class CarController(CarControllerBase, GasInterceptorCarController):
     actuators = CC.actuators
     stopping = actuators.longControlState == LongCtrlState.stopping
     hud_control = CC.hudControl
-    pcm_cancel_cmd = CC.cruiseControl.cancel
+    # Never force-cancel during or shortly after a driver brake press: the PCM always cancels
+    # itself on brake, but can hold CRUISE_ACTIVE up to ~1.5s after the press (hybrid brake
+    # blending), beyond any workable delay — a timed cancel would still fire the PCM fault chime.
+    # The delay below covers short non-brake transients (stalk presses assert cancel for 1-3
+    # frames). This path only silences the chime; it has no bearing on lateral behavior.
+    self.brake_clear_frames = 0 if CS.out.brakePressed else min(self.brake_clear_frames + 1, BRAKE_CLEAR_MIN_FRAMES + 1)
+    pcm_cancel_cmd = self.cancel_after_delay(CC.cruiseControl.cancel and self.brake_clear_frames > BRAKE_CLEAR_MIN_FRAMES,
+                                             CRUISE_CANCEL_DELAY_FRAMES)
     lat_active = CC.latActive and abs(CS.out.steeringTorque) < MAX_USER_TORQUE
 
     if len(CC.orientationNED) == 3:

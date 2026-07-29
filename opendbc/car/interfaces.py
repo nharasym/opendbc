@@ -404,7 +404,12 @@ class CarControllerBase(ABC):
     self.CP = CP
     self.CP_SP = CP_SP
     self.frame = 0
+    self.cancel_counter = 0  # cancel_after_delay state; Toyota uses the shared helper, GM/Hyundai keep their upstream-local equivalents
     self.secoc_key: bytes = b"00" * 16
+
+  def cancel_after_delay(self, cancel: bool, delay_frames: int) -> bool:
+    self.cancel_counter = self.cancel_counter + 1 if cancel else 0
+    return self.cancel_counter > delay_frames
 
   @abstractmethod
   def update(self, CC: structs.CarControl, CC_SP: structs.CarControlSP, CS: CarStateBase, now_nanos: int) -> tuple[structs.CarControl.Actuators, list[CanData]]:
