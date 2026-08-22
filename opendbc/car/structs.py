@@ -167,3 +167,7 @@ class CarControlSP:
 @auto_dataclass
 class CarStateSP:
   speedLimit: float = auto_field()
+  # factory BSM fast-approaching bits, kept distinct from left/rightBlindspot (which upstream
+  # ORs both ADJACENT and APPROACHING into) so consumers can key on closing traffic alone
+  leftBlindspotApproaching: bool = auto_field()
+  rightBlindspotApproaching: bool = auto_field()
