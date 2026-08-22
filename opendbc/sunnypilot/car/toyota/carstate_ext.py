@@ -168,3 +168,11 @@ class CarStateExt:
     # Update traffic signals and speed limit
     self.update_traffic_signals(cp_cam)
     ret_sp.speedLimit = self.calculate_speed_limit()
+
+    # HL-FEAT(bsm-approaching): expose the radar's fast-approaching bits separately. Upstream
+    # ORs L/R_APPROACHING into left/rightBlindspot (car/toyota/carstate.py) — right for
+    # lane-change blocking, but it erases the adjacent-vs-approaching distinction the
+    # approaching-vehicle audible alert keys on.
+    if self.CP.enableBsm:
+      ret_sp.leftBlindspotApproaching = cp.vl["BSM"]["L_APPROACHING"] == 1
+      ret_sp.rightBlindspotApproaching = cp.vl["BSM"]["R_APPROACHING"] == 1
