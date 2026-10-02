@@ -136,42 +136,49 @@ def create_fcw_command(packer, fcw):
 
 def create_ui_command(packer, steer, chime, left_line, right_line, left_lane_depart, right_lane_depart, enabled, stock_lkas_hud,
                       stock_hud_when_lat_off=False, lat_enabled=None):
-  # HL-FEAT(stock-hud-lat-off): `enabled` is CC.latActive. Upstream already ties BARRIERS (the
-  # centre bars) to it, but the lane lines and LKAS_STATUS (the cluster's LTA symbol) stay lit
-  # no matter what, because controlsd hardcodes leftLaneVisible/rightLaneVisible = True.
+  # HL-FEAT(stock-hud-lat-off): draw the cluster the way the car's own camera does. `enabled` is
+  # CC.latActive ("steering right now"; drops at standstill and blinker-pause); `lat_enabled` is
+  # "LKA switched on and the car is drivable" (CC_SP.mads.enabled, MADS 'paused' included, gated
+  # in carcontroller). Upstream keys only BARRIERS on state: the lines are always solid (controlsd
+  # hardcodes leftLaneVisible/rightLaneVisible = True since openpilot #22693) and LKAS_STATUS is a
+  # static 1 inherited from a 2017 capture, so the LTA symbol never leaves the dash.
   #
-  # Measured on the 2023 Highlander's own camera (bus 2) by toggling the steering-wheel LTA
-  # button with the car parked (2026-10-01, route 000000dd t+2569..2604 s, 0x371
-  # STEERING_PRESSED marks each press). The camera has exactly two states:
-  #   LTA switched OFF:  LEFT/RIGHT_LINE=0 LKAS_STATUS=0 BARRIERS=0  (LDA_UNAVAILABLE=0)
+  # Camera bytes, measured on the 2023 Highlander (bus 2, 2026-10-01, route 000000dd, LTA button
+  # toggled while parked; 0x343/0x191 never changed, so the symbol is a 0x412 affair):
+  #   LTA switched OFF:  LEFT/RIGHT_LINE=0 LKAS_STATUS=0 BARRIERS=0
   #   LTA ON, standby:   LEFT/RIGHT_LINE=2 LKAS_STATUS=1 BARRIERS=0  (+LDA_ON_MESSAGE=1 for 6 s)
-  # 0x343 and 0x191 did not change, so the symbol is a 0x412 affair. History: upstream's static
-  # LKAS_STATUS=1 kept the symbol lit even with lateral off; the first cut of this feature sent
-  # LINES=2/LKAS_STATUS=0, which is neither state and killed the symbol even while steering.
-  # Three states, keyed the way stock keys them. `enabled` (CC.latActive) is "steering right
-  # now" and drops at standstill and during blinker-pause; `lat_enabled` (CC_SP.mads.enabled,
-  # MADS 'paused' included) is "LKA switched on". Stock keeps the symbol through a stop and a
-  # turn signal, so the symbol and lines follow lat_enabled; only BARRIERS follows `enabled`.
-  #   LKA off              -> camera OFF bytes      lines 0 / status 0 / bars 0
-  #   on, not steering     -> camera STANDBY bytes  lines 2 / status 1 / bars 0
-  #   steering             -> upstream             lines 1 / status 1 / bars 1
-  # Departure (3) is tested first and still wins, so LDW keeps drawing. lat_enabled=None (other
-  # call sites) means "same as enabled". Flag off reproduces upstream bit for bit.
+  # Active centering and departure were never captured here (stock LTA cannot steer with the
+  # comma fitted). Toyota's 2023 Highlander manual and other owners' photos (commaai/opendbc #2674)
+  # give the rest: LKAS_STATUS 2 = green symbol while centering, 3 = orange flashing on a
+  # departure alert; lines are solid only while the camera sees a marker, outlines otherwise.
+  #
+  #   LKA off              -> lines 0           / status 0 / bars 0  (bars 0 even if latActive
+  #                                                           lags a door/belt event by a frame)
+  #   on, not steering     -> lines visible?1:2 / status 1 / bars 0
+  #   steering             -> lines visible?1:2 / status 2 / bars 1
+  #   departure alert      -> that line 3       / status 3   (also with LKA off: openpilot's LDW
+  #                                                           keeps running there, by choice)
+  # LDA_ON_MESSAGE is mirrored from the camera's own message (it already carries the 6 s pulse
+  # per button press, exact timing included). lat_enabled=None (other call sites) means "same as
+  # enabled". Flag off reproduces upstream bit for bit.
   if lat_enabled is None:
     lat_enabled = enabled
   lta_off = stock_hud_when_lat_off and not lat_enabled
-  standby = stock_hud_when_lat_off and lat_enabled and not enabled
+  if stock_hud_when_lat_off:
+    lkas_status = 3 if (left_lane_depart or right_lane_depart) else 0 if lta_off else 2 if enabled else 1
+  else:
+    lkas_status = 1
   values = {
     "TWO_BEEPS": chime,
     "LDA_ALERT": steer,
-    "RIGHT_LINE": 3 if right_lane_depart else 0 if lta_off else 2 if standby else 1 if right_line else 2,
-    "LEFT_LINE": 3 if left_lane_depart else 0 if lta_off else 2 if standby else 1 if left_line else 2,
-    "BARRIERS": 1 if enabled else 0,
+    "RIGHT_LINE": 3 if right_lane_depart else 0 if lta_off else 1 if right_line else 2,
+    "LEFT_LINE": 3 if left_lane_depart else 0 if lta_off else 1 if left_line else 2,
+    "BARRIERS": 1 if (enabled and not lta_off) else 0,  # never bars on an OFF cluster (door/belt race)
 
     # static signals
     "SET_ME_X02": 2,
     "SET_ME_X01": 1,
-    "LKAS_STATUS": 0 if lta_off else 1,  # HL-FEAT(stock-hud-lat-off): camera's OFF state
+    "LKAS_STATUS": lkas_status,  # HL-FEAT(stock-hud-lat-off): camera's symbol states, upstream static 1
     "REPEATED_BEEPS": 0,
     "LANE_SWAY_FLD": 7,
     "LANE_SWAY_BUZZER": 0,
@@ -201,6 +208,9 @@ def create_ui_command(packer, steer, chime, left_line, right_line, left_lane_dep
       "LANE_SWAY_SENSITIVITY",
       "LANE_SWAY_TOGGLE",
     ]})
+    if stock_hud_when_lat_off:
+      # HL-FEAT(stock-hud-lat-off): the camera's button toast pulse (1 for 6 s after each LTA press)
+      values["LDA_ON_MESSAGE"] = stock_lkas_hud["LDA_ON_MESSAGE"]
 
   return packer.make_can_msg("LKAS_HUD", 0, values)
 
