@@ -324,7 +324,8 @@ class CarController(CarControllerBase, GasInterceptorCarController):
       if self.frame % 20 == 0 or send_ui:
         can_sends.append(toyotacan.create_ui_command(self.packer, steer_alert, pcm_cancel_cmd, hud_control.leftLaneVisible,
                                                      hud_control.rightLaneVisible, hud_control.leftLaneDepart,
-                                                     hud_control.rightLaneDepart, CC.latActive, CS.lkas_hud))
+                                                     hud_control.rightLaneDepart, CC.latActive, CS.lkas_hud,
+                                                     stock_hud_when_lat_off=bool(self.CP_SP.flags & ToyotaFlagsSP.STOCK_HUD_LAT_OFF)))
 
       if (self.frame % 100 == 0 or send_ui) and self.CP.flags & ToyotaFlags.DISABLE_RADAR.value:
         can_sends.append(toyotacan.create_fcw_command(self.packer, fcw_alert))

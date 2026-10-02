@@ -166,3 +166,9 @@ def _initialize_toyota(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params
 
     if toyota_stop_and_go_hack and CP.openpilotLongitudinalControl:
       CP_SP.flags |= ToyotaFlagsSP.STOP_AND_GO_HACK.value
+
+    # HL-FEAT(stock-hud-lat-off): while openpilot is NOT steering, draw the cluster the way
+    # stock Toyota draws it with LTA off (no lane lines, no LKAS symbol). Default ON via
+    # params_keys.h; the dict default stays 0 so opendbc's own tests see upstream behaviour.
+    if int(params_dict.get("ToyotaStockHudLatOff", 0)) == 1:
+      CP_SP.flags |= ToyotaFlagsSP.STOCK_HUD_LAT_OFF.value
