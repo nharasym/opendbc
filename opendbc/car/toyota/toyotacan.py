@@ -135,7 +135,7 @@ def create_fcw_command(packer, fcw):
 
 
 def create_ui_command(packer, steer, chime, left_line, right_line, left_lane_depart, right_lane_depart, enabled, stock_lkas_hud,
-                      stock_hud_when_lat_off=False):
+                      stock_hud_when_lat_off=False, lat_enabled=None):
   # HL-FEAT(stock-hud-lat-off): `enabled` is CC.latActive. Upstream already ties BARRIERS (the
   # centre bars) to it, but the lane lines and LKAS_STATUS (the cluster's LTA symbol) stay lit
   # no matter what, because controlsd hardcodes leftLaneVisible/rightLaneVisible = True.
@@ -148,15 +148,24 @@ def create_ui_command(packer, steer, chime, left_line, right_line, left_lane_dep
   # 0x343 and 0x191 did not change, so the symbol is a 0x412 affair. History: upstream's static
   # LKAS_STATUS=1 kept the symbol lit even with lateral off; the first cut of this feature sent
   # LINES=2/LKAS_STATUS=0, which is neither state and killed the symbol even while steering.
-  # So: not steering -> the camera's OFF bytes; steering -> upstream (BARRIERS=1, lines, status 1),
-  # which is the look the passenger asked to keep. Departure (3) is tested first and still wins,
-  # so LDW keeps drawing. Flag off reproduces upstream bit for bit.
-  lta_off = stock_hud_when_lat_off and not enabled
+  # Three states, keyed the way stock keys them. `enabled` (CC.latActive) is "steering right
+  # now" and drops at standstill and during blinker-pause; `lat_enabled` (CC_SP.mads.enabled,
+  # MADS 'paused' included) is "LKA switched on". Stock keeps the symbol through a stop and a
+  # turn signal, so the symbol and lines follow lat_enabled; only BARRIERS follows `enabled`.
+  #   LKA off              -> camera OFF bytes      lines 0 / status 0 / bars 0
+  #   on, not steering     -> camera STANDBY bytes  lines 2 / status 1 / bars 0
+  #   steering             -> upstream             lines 1 / status 1 / bars 1
+  # Departure (3) is tested first and still wins, so LDW keeps drawing. lat_enabled=None (other
+  # call sites) means "same as enabled". Flag off reproduces upstream bit for bit.
+  if lat_enabled is None:
+    lat_enabled = enabled
+  lta_off = stock_hud_when_lat_off and not lat_enabled
+  standby = stock_hud_when_lat_off and lat_enabled and not enabled
   values = {
     "TWO_BEEPS": chime,
     "LDA_ALERT": steer,
-    "RIGHT_LINE": 3 if right_lane_depart else 0 if lta_off else 1 if right_line else 2,
-    "LEFT_LINE": 3 if left_lane_depart else 0 if lta_off else 1 if left_line else 2,
+    "RIGHT_LINE": 3 if right_lane_depart else 0 if lta_off else 2 if standby else 1 if right_line else 2,
+    "LEFT_LINE": 3 if left_lane_depart else 0 if lta_off else 2 if standby else 1 if left_line else 2,
     "BARRIERS": 1 if enabled else 0,
 
     # static signals
