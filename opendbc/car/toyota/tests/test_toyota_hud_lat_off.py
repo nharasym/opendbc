@@ -3,15 +3,19 @@
 Uses a recording packer so the assertions are on the signal VALUES, not on packed bytes --
 no DBC needed and no chance of a bit-layout change masking a logic change.
 """
+from opendbc.car import structs
+from opendbc.car.car_helpers import interfaces
 from opendbc.car.toyota import toyotacan
+from opendbc.sunnypilot.car.toyota.values import ToyotaFlagsSP
 
 
 class _RecordingPacker:
   def __init__(self):
     self.values = None
+    self.name = None
 
   def make_can_msg(self, name, bus, values):
-    assert name == "LKAS_HUD"
+    self.name = name
     self.values = dict(values)
     return (name, bus, values)
 
@@ -33,15 +37,107 @@ class TestStockHudWhenLatOff:
     v = _hud(enabled=True, flag=True)
     assert (v["LEFT_LINE"], v["RIGHT_LINE"], v["LKAS_STATUS"], v["BARRIERS"]) == (1, 1, 1, 1)
 
-  def test_flag_on_and_not_steering_looks_like_stock_lta_off(self):
+  def test_flag_on_and_not_steering_is_the_cameras_lta_off_state(self):
+    # measured by toggling the LTA button: OFF = lines 0, LKAS_STATUS 0, barriers 0
     v = _hud(enabled=False, flag=True)
-    assert (v["LEFT_LINE"], v["RIGHT_LINE"], v["LKAS_STATUS"], v["BARRIERS"]) == (2, 2, 0, 0)
+    assert (v["LEFT_LINE"], v["RIGHT_LINE"], v["LKAS_STATUS"], v["BARRIERS"]) == (0, 0, 0, 0)
+
+  def test_lkas_status_follows_lateral_only_with_the_flag(self):
+    assert _hud(enabled=True, flag=True)["LKAS_STATUS"] == 1      # steering: symbol on
+    assert _hud(enabled=False, flag=True)["LKAS_STATUS"] == 0     # not steering: symbol off
+    assert _hud(enabled=False, flag=False)["LKAS_STATUS"] == 1    # flag off: upstream static 1
 
   def test_lane_departure_still_draws_with_lateral_off(self):
     v = _hud(enabled=False, flag=True, left_depart=True)
-    assert v["LEFT_LINE"] == 3 and v["RIGHT_LINE"] == 2
+    assert v["LEFT_LINE"] == 3 and v["RIGHT_LINE"] == 0
 
   def test_default_kwarg_keeps_old_call_sites_working(self):
     p = _RecordingPacker()
     toyotacan.create_ui_command(p, 0, 0, True, True, False, False, False, {})
     assert p.values["LEFT_LINE"] == 1 and p.values["LKAS_STATUS"] == 1
+
+
+def _acc(stock_idle, lead=True, permit=True, standstill_req=False, cancel=False, accel=0.0):
+  p = _RecordingPacker()
+  toyotacan.create_accel_command(p, accel, cancel, permit, standstill_req, lead, 1, False, 0, stock_idle=stock_idle)
+  assert p.name == "ACC_CONTROL"
+  return p.values
+
+
+class TestStockIdleAccControl:
+  def test_default_is_upstream(self):
+    v = _acc(stock_idle=False)
+    assert (v["MINI_CAR"], v["PERMIT_BRAKING"], v["RELEASE_STANDSTILL"], v["ALLOW_LONG_PRESS"]) == (True, True, True, 1)
+
+  def test_idle_matches_stock_no_lead_tuple(self):
+    # stock ADAS module's dominant idle frame: ACC_TYPE=1 ALLOW_LONG_PRESS=3, state bits 0
+    v = _acc(stock_idle=True)
+    assert (v["PERMIT_BRAKING"], v["RELEASE_STANDSTILL"], v["ALLOW_LONG_PRESS"], v["ACC_CUT_IN"], v["DISTANCE"]) == (0, 0, 3, 0, 0)
+    assert v["ACC_TYPE"] == 1
+
+  def test_idle_keeps_mini_car_so_low_speed_set_still_engages(self):
+    # upstream's lead = leadVisible or vEgo < 12 exists so ACC can be engaged; never zero it
+    assert _acc(stock_idle=True, lead=True)["MINI_CAR"] is True
+    assert _acc(stock_idle=True, lead=False)["MINI_CAR"] is False
+
+  def test_idle_never_touches_accel_or_cancel(self):
+    # a non-zero accel so a regression that zeroes ACCEL_CMD cannot hide behind 0.0
+    v = _acc(stock_idle=True, cancel=True, accel=1.234)
+    assert v["CANCEL_REQ"] is True and v["ACCEL_CMD"] == 1.234
+
+
+# ---- CarController-level: the call-site gating on the real Highlander interface ----
+
+ACC_CONTROL_ADDR = 0x343
+_FP = {i: {} for i in range(7)}
+
+
+def _sig(dat, s, L):
+  # DBC Motorola start bit s (MSB) -> value; same formula as the log decoder
+  D = int.from_bytes(bytes(dat).ljust(8, b"\0")[:8], "big")
+  p = 8 * (s // 8) + 7 - (s % 8)
+  return (D >> (64 - p - L)) & ((1 << L) - 1)
+
+
+def _build(flag: bool):
+  name = "TOYOTA_HIGHLANDER_TSS2"
+  CI = interfaces[name]
+  CP = CI.get_params(name, _FP, [], alpha_long=False, is_release=False, docs=False)
+  CP_SP = CI.get_params_sp(CP, name, _FP, [], alpha_long=False, is_release_sp=False, docs=False)
+  if flag:
+    CP_SP.flags |= ToyotaFlagsSP.STOCK_HUD_LAT_OFF.value
+  ci = CI(CP, CP_SP)
+  assert ci.CP.openpilotLongitudinalControl
+  ci.update([])
+  return ci
+
+
+def _acc_bits(ci, enabled: bool, pcm_cruise: bool, frames: int = 8):
+  """Drive a few 10 ms frames; return (PERMIT_BRAKING, RELEASE_STANDSTILL, ALLOW_LONG_PRESS) of the last ACC_CONTROL."""
+  ci.CS.out.cruiseState.enabled = pcm_cruise
+  last = None
+  for i in range(frames):
+    CC = structs.CarControl()
+    CC.enabled = enabled
+    CC.longActive = enabled
+    _, msgs = ci.apply(CC.as_reader(), structs.CarControlSP(), int(i * 0.01 * 1e9))
+    for addr, dat, _ in msgs:
+      if addr == ACC_CONTROL_ADDR:
+        last = (_sig(dat, 30, 1), _sig(dat, 31, 1), _sig(dat, 17, 2))
+  assert last is not None, "ACC_CONTROL was never sent"
+  return last
+
+
+class TestStockIdleCallSite:
+  def test_flag_off_is_upstream_when_idle(self):
+    assert _acc_bits(_build(False), enabled=False, pcm_cruise=False) == (1, 1, 1)
+
+  def test_flag_on_idle_sends_stock_bits(self):
+    assert _acc_bits(_build(True), enabled=False, pcm_cruise=False) == (0, 0, 3)
+
+  def test_flag_on_but_pcm_cruise_engaged_is_upstream(self):
+    # brake-blend window / cancel frames: PCM still has cruise, openpilot does not -> upstream bits
+    assert _acc_bits(_build(True), enabled=False, pcm_cruise=True) == (1, 1, 1)
+
+  def test_flag_on_and_openpilot_engaged_is_upstream(self):
+    assert _acc_bits(_build(True), enabled=True, pcm_cruise=True) == (1, 1, 1)
