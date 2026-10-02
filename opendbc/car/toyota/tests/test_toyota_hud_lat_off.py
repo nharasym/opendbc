@@ -176,3 +176,54 @@ class TestStockIdleCallSite:
 
   def test_flag_on_and_openpilot_engaged_is_upstream(self):
     assert _acc_bits(_build(True), enabled=True, pcm_cruise=True) == (1, 1, 1)
+
+
+def _hud_status(ci, mads_enabled: bool, gear, belt_ok=True, door_closed=True, pbrake=False, frames: int = 25):
+  """Drive frames with MADS available; return LKAS_STATUS of the last LKAS_HUD (sent every 20 frames)."""
+  ci.CS.out.gearShifter = gear
+  ci.CS.out.seatbeltUnlatched = not belt_ok
+  ci.CS.out.doorOpen = not door_closed
+  ci.CS.out.parkingBrake = pbrake
+  last = None
+  for i in range(frames):
+    CC = structs.CarControl()
+    CC_SP = structs.CarControlSP()
+    CC_SP.mads.available = True
+    CC_SP.mads.enabled = mads_enabled
+    _, msgs = ci.apply(CC.as_reader(), CC_SP, int(i * 0.01 * 1e9))
+    for addr, dat, _ in msgs:
+      if addr == 0x412:
+        last = _sig(dat, 7, 2)
+  assert last is not None, "LKAS_HUD was never sent"
+  return last
+
+
+class TestHalfWayStateInParkOrUnbuckled:
+  """Road test 2026-10-02 photos: LKA button pressed in Park / unbuckled drew the symbol and road
+  scene (standby bytes) although nothing could engage. Stock shows OFF there. The symbol must
+  follow 'LKA on AND car drivable'."""
+  GS = structs.CarState.GearShifter
+
+  def test_park_with_lka_on_shows_off(self):
+    assert _hud_status(_build(True), True, self.GS.park) == 0
+
+  def test_reverse_and_neutral_show_off(self):
+    assert _hud_status(_build(True), True, self.GS.reverse) == 0
+    assert _hud_status(_build(True), True, self.GS.neutral) == 0
+
+  def test_unbuckled_in_drive_shows_off(self):
+    assert _hud_status(_build(True), True, self.GS.drive, belt_ok=False) == 0
+
+  def test_door_open_or_park_brake_show_off(self):
+    assert _hud_status(_build(True), True, self.GS.drive, door_closed=False) == 0
+    assert _hud_status(_build(True), True, self.GS.drive, pbrake=True) == 0
+
+  def test_drive_buckled_with_lka_on_shows_standby_symbol(self):
+    # latActive False (not steering) but LKA on and drivable -> standby: symbol stays
+    assert _hud_status(_build(True), True, self.GS.drive) == 1
+
+  def test_lka_off_in_drive_shows_off(self):
+    assert _hud_status(_build(True), False, self.GS.drive) == 0
+
+  def test_flag_off_is_upstream_static_1_regardless(self):
+    assert _hud_status(_build(False), True, self.GS.park) == 1
