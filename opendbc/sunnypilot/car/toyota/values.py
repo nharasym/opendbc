@@ -14,6 +14,7 @@ class ToyotaFlagsSP(IntFlag):
   ZSS = 4
   STOCK_LONGITUDINAL = 8
   STOP_AND_GO_HACK = 16
+  STOCK_HUD_LAT_OFF = 32  # HL-FEAT(stock-hud-lat-off)
 
 
 class ToyotaSafetyFlagsSP:

@@ -110,18 +110,26 @@ def create_fcw_command(packer, fcw):
   return packer.make_can_msg("PCS_HUD", 0, values)
 
 
-def create_ui_command(packer, steer, chime, left_line, right_line, left_lane_depart, right_lane_depart, enabled, stock_lkas_hud):
+def create_ui_command(packer, steer, chime, left_line, right_line, left_lane_depart, right_lane_depart, enabled, stock_lkas_hud,
+                      stock_hud_when_lat_off=False):
+  # HL-FEAT(stock-hud-lat-off): `enabled` is CC.latActive. Upstream already ties BARRIERS (the
+  # centre bars) to it, but the lane lines and LKAS_STATUS (the cluster symbol) stay lit no
+  # matter what, because controlsd hardcodes leftLaneVisible/rightLaneVisible = True. With the
+  # flag, both follow lateral state so the cluster looks like stock Toyota with LTA off while
+  # we are not steering. Departure (3) is tested first and still wins, so LDW keeps drawing.
+  # Flag off reproduces upstream bit for bit.
+  show_lines = enabled or not stock_hud_when_lat_off
   values = {
     "TWO_BEEPS": chime,
     "LDA_ALERT": steer,
-    "RIGHT_LINE": 3 if right_lane_depart else 1 if right_line else 2,
-    "LEFT_LINE": 3 if left_lane_depart else 1 if left_line else 2,
+    "RIGHT_LINE": 3 if right_lane_depart else 1 if (right_line and show_lines) else 2,
+    "LEFT_LINE": 3 if left_lane_depart else 1 if (left_line and show_lines) else 2,
     "BARRIERS": 1 if enabled else 0,
 
     # static signals
     "SET_ME_X02": 2,
     "SET_ME_X01": 1,
-    "LKAS_STATUS": 1,
+    "LKAS_STATUS": 1 if show_lines else 0,  # HL-FEAT(stock-hud-lat-off)
     "REPEATED_BEEPS": 0,
     "LANE_SWAY_FLD": 7,
     "LANE_SWAY_BUZZER": 0,
