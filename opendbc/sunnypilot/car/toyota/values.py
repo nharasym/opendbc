@@ -15,6 +15,7 @@ class ToyotaFlagsSP(IntFlag):
   STOCK_LONGITUDINAL = 8
   STOP_AND_GO_HACK = 16
   TSS2_SMOOTH = 32
+  STOCK_HUD_LAT_OFF = 64  # HL-FEAT(stock-hud-lat-off): 32 is upstream's TSS2_SMOOTH
 
 
 # kiBP, kiV for the PCM accel PID with TSS2_SMOOTH
