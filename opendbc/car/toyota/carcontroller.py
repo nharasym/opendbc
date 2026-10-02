@@ -283,8 +283,14 @@ class CarController(CarControllerBase, GasInterceptorCarController):
         pcm_accel_cmd = float(np.clip(pcm_accel_cmd, self.params.ACCEL_MIN, self.params.ACCEL_MAX))
 
         main_accel_cmd = 0. if self.CP.flags & ToyotaFlags.SECOC.value else pcm_accel_cmd
+        # HL-FEAT(stock-hud-lat-off): stock-idle ACC_CONTROL bytes while cruise is not engaged on
+        # EITHER side. Gating on the PCM too keeps three windows bit-identical to upstream: the
+        # hybrid's <=1.5 s brake-blend after a pedal release, every CANCEL_REQ frame (the silent
+        # cancel was road-validated with upstream bits), and the 1-3 frame engage latency.
+        stock_idle = (bool(self.CP_SP.flags & ToyotaFlagsSP.STOCK_HUD_LAT_OFF)
+                      and not CC.enabled and not CS.out.cruiseState.enabled)
         can_sends.append(toyotacan.create_accel_command(self.packer, main_accel_cmd, pcm_cancel_cmd, self.permit_braking, self.standstill_req, lead,
-                                                        CS.acc_type, fcw_alert, self.distance_button))
+                                                        CS.acc_type, fcw_alert, self.distance_button, stock_idle=stock_idle))
         if self.CP.flags & ToyotaFlags.SECOC.value:
           acc_cmd_2 = toyotacan.create_accel_command_2(self.packer, pcm_accel_cmd)
           acc_cmd_2 = add_mac(self.secoc_key,
