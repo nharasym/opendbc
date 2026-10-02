@@ -20,11 +20,12 @@ class _RecordingPacker:
     return (name, bus, values)
 
 
-def _hud(enabled, flag, left_depart=False, right_depart=False):
+def _hud(enabled, flag, left_depart=False, right_depart=False, lat_enabled=None):
   p = _RecordingPacker()
   toyotacan.create_ui_command(p, steer=0, chime=0, left_line=True, right_line=True,
                               left_lane_depart=left_depart, right_lane_depart=right_depart,
-                              enabled=enabled, stock_lkas_hud={}, stock_hud_when_lat_off=flag)
+                              enabled=enabled, stock_lkas_hud={}, stock_hud_when_lat_off=flag,
+                              lat_enabled=lat_enabled)
   return p.values
 
 
@@ -62,6 +63,40 @@ def _acc(stock_idle, lead=True, permit=True, standstill_req=False, cancel=False,
   toyotacan.create_accel_command(p, accel, cancel, permit, standstill_req, lead, 1, False, 0, stock_idle=stock_idle)
   assert p.name == "ACC_CONTROL"
   return p.values
+
+
+class TestLkaOnButNotSteering:
+  """Road test 2026-10-02: with LKA on, the symbol and lines vanished at a stop and during a turn
+  signal, because CC.latActive drops there. Stock keeps them. lat_enabled carries 'switched on'."""
+
+  def test_standstill_with_lka_on_is_the_cameras_standby_state(self):
+    v = _hud(enabled=False, flag=True, lat_enabled=True)
+    assert (v["LEFT_LINE"], v["RIGHT_LINE"], v["LKAS_STATUS"], v["BARRIERS"]) == (2, 2, 1, 0)
+
+  def test_turn_signal_pause_keeps_the_symbol(self):
+    # blinker-pause: latActive False, mads.enabled True -> same standby state, symbol stays
+    assert _hud(enabled=False, flag=True, lat_enabled=True)["LKAS_STATUS"] == 1
+
+  def test_lka_switched_off_is_still_the_off_state(self):
+    v = _hud(enabled=False, flag=True, lat_enabled=False)
+    assert (v["LEFT_LINE"], v["RIGHT_LINE"], v["LKAS_STATUS"], v["BARRIERS"]) == (0, 0, 0, 0)
+
+  def test_steering_is_unchanged(self):
+    v = _hud(enabled=True, flag=True, lat_enabled=True)
+    assert (v["LEFT_LINE"], v["RIGHT_LINE"], v["LKAS_STATUS"], v["BARRIERS"]) == (1, 1, 1, 1)
+
+  def test_lat_enabled_none_means_same_as_enabled(self):
+    # other call sites that never pass lat_enabled keep the two-state behaviour
+    assert _hud(enabled=False, flag=True)["LKAS_STATUS"] == 0
+    assert _hud(enabled=True, flag=True)["LKAS_STATUS"] == 1
+
+  def test_departure_still_wins_in_standby(self):
+    v = _hud(enabled=False, flag=True, lat_enabled=True, left_depart=True)
+    assert v["LEFT_LINE"] == 3 and v["RIGHT_LINE"] == 2
+
+  def test_flag_off_ignores_lat_enabled(self):
+    v = _hud(enabled=False, flag=False, lat_enabled=True)
+    assert (v["LEFT_LINE"], v["RIGHT_LINE"], v["LKAS_STATUS"], v["BARRIERS"]) == (1, 1, 1, 0)
 
 
 class TestStockIdleAccControl:
