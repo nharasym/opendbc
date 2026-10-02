@@ -15,6 +15,11 @@ from opendbc.can import CANPacker
 from opendbc.sunnypilot.car.toyota.gas_interceptor import GasInterceptorCarController
 from opendbc.sunnypilot.car.toyota.values import ToyotaFlagsSP
 
+# HL-FEAT(stock-hud-lat-off): gears in which LTA could actually engage. Park/Reverse/Neutral
+# (and unknown) are not drivable, so the cluster shows LKA OFF there even if the button is on.
+HUD_DRIVABLE_GEARS = (structs.CarState.GearShifter.drive, structs.CarState.GearShifter.eco, structs.CarState.GearShifter.sport,
+                      structs.CarState.GearShifter.low, structs.CarState.GearShifter.manumatic, structs.CarState.GearShifter.brake)
+
 Ecu = structs.CarParams.Ecu
 LongCtrlState = structs.CarControl.Actuators.LongControlState
 SteerControlType = structs.CarParams.SteerControlType
@@ -327,14 +332,22 @@ class CarController(CarControllerBase, GasInterceptorCarController):
         # forcing the pcm to disengage causes a bad fault sound so play a good sound instead
         send_ui = True
 
+      # HL-FEAT(stock-hud-lat-off): "LKA switched on" for the cluster. MADS 'paused' is an ENABLED
+      # state, so mads.enabled survives standstill and blinker-pause (where the symbol must stay),
+      # but it ALSO survives Park/Reverse/Neutral, an open door, an unlatched belt and the park
+      # brake -- the car-side conditions MADS pauses on (mads/state.py GEARS_ALLOW_PAUSED). Stock
+      # shows LKA OFF in those, and openpilot cannot engage there either, so gate on them. Brake
+      # hold and standstill are deliberately NOT in this list: those are pauses while driving.
+      mads_on = bool(CC_SP.mads.enabled) if CC_SP.mads.available else CC.enabled
+      car_drivable = (CS.out.gearShifter in HUD_DRIVABLE_GEARS and not CS.out.seatbeltUnlatched
+                      and not CS.out.doorOpen and not CS.out.parkingBrake)
+      hud_lat_enabled = mads_on and car_drivable
       if self.frame % 20 == 0 or send_ui:
         can_sends.append(toyotacan.create_ui_command(self.packer, steer_alert, pcm_cancel_cmd, hud_control.leftLaneVisible,
                                                      hud_control.rightLaneVisible, hud_control.leftLaneDepart,
                                                      hud_control.rightLaneDepart, CC.latActive, CS.lkas_hud,
                                                      stock_hud_when_lat_off=bool(self.CP_SP.flags & ToyotaFlagsSP.STOCK_HUD_LAT_OFF),
-                                                     # HL-FEAT(stock-hud-lat-off): "LKA switched on" survives standstill
-                                                     # and blinker-pause (MADS paused is an ENABLED state); latActive does not
-                                                     lat_enabled=(bool(CC_SP.mads.enabled) if CC_SP.mads.available else CC.enabled)))
+                                                     lat_enabled=hud_lat_enabled))
 
       if (self.frame % 100 == 0 or send_ui) and self.CP.flags & ToyotaFlags.DISABLE_RADAR.value:
         can_sends.append(toyotacan.create_fcw_command(self.packer, fcw_alert))
