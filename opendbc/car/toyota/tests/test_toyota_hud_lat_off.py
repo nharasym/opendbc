@@ -235,31 +235,38 @@ class TestStockIdleCallSite:
     assert _acc_bits(_build(True), enabled=True, pcm_cruise=True) == (1, 1, 1)
 
 
-def _hud_bits(ci, mads_enabled: bool, gear, belt_ok=True, door_closed=True, pbrake=False, frames: int = 25,
-              lat_active=False, depart=False, visible=(True, True)):
-  """Drive frames with MADS available; return (LEFT_LINE, RIGHT_LINE, LKAS_STATUS, BARRIERS, LDA_ON_MESSAGE)
-  of the last LKAS_HUD (sent every 20 frames). Bit positions per the DBC: LEFT 5|2, RIGHT 3|2, STATUS 7|2,
-  BARRIERS 1|2, LDA_ON_MESSAGE 31|2."""
+def _hud_sends(ci, mads_enabled: bool, gear, belt_ok=True, door_closed=True, pbrake=False, frames: int = 25,
+               lat_active=False, depart=False, visible=(True, True), mads_available=True, cc_enabled=False):
+  """Drive frames; return every LKAS_HUD sent as (controller frame, (LEFT_LINE, RIGHT_LINE, LKAS_STATUS, BARRIERS,
+  LDA_ON_MESSAGE)). Bit positions per the DBC: LEFT 5|2, RIGHT 3|2, STATUS 7|2, BARRIERS 1|2, LDA_ON_MESSAGE 31|2."""
   ci.CS.out.gearShifter = gear
   ci.CS.out.seatbeltUnlatched = not belt_ok
   ci.CS.out.doorOpen = not door_closed
   ci.CS.out.parkingBrake = pbrake
-  last = None
+  sends = []
   for i in range(frames):
     CC = structs.CarControl()
+    CC.enabled = cc_enabled
     CC.latActive = lat_active
     CC.hudControl.leftLaneDepart = depart
     CC.hudControl.leftLaneVisible = visible[0]
     CC.hudControl.rightLaneVisible = visible[1]
     CC_SP = structs.CarControlSP()
-    CC_SP.mads.available = True
+    CC_SP.mads.available = mads_available
     CC_SP.mads.enabled = mads_enabled
+    frame = ci.CC.frame
     _, msgs = ci.apply(CC.as_reader(), CC_SP, int(i * 0.01 * 1e9))
     for addr, dat, _ in msgs:
       if addr == 0x412:
-        last = (_sig(dat, 5, 2), _sig(dat, 3, 2), _sig(dat, 7, 2), _sig(dat, 1, 2), _sig(dat, 31, 2))
-  assert last is not None, "LKAS_HUD was never sent"
-  return last
+        sends.append((frame, (_sig(dat, 5, 2), _sig(dat, 3, 2), _sig(dat, 7, 2), _sig(dat, 1, 2), _sig(dat, 31, 2))))
+  return sends
+
+
+def _hud_bits(ci, *args, **kwargs):
+  """The last LKAS_HUD's bits over the driven frames (sent every 20 frames, plus on symbol/toast changes)."""
+  sends = _hud_sends(ci, *args, **kwargs)
+  assert sends, "LKAS_HUD was never sent"
+  return sends[-1][1]
 
 
 def _hud_status(ci, *args, **kwargs):
@@ -350,6 +357,60 @@ class TestLinesThroughTheCarController:
     # the camera does not pulse at ignition (status comes up 0 or 1 with pulse 0 on ec/e2/d5)
     ci = _build(True)
     assert _hud_bits(ci, True, self.GS.drive, frames=25)[4] == 0
+
+  def test_toast_never_pairs_with_off_bytes(self):
+    # the camera never sends the toast with STATUS 0 (0 of 115 pulse frames on ec+e2); neither do we
+    GS = self.GS
+    ci = _build(True)
+    _hud_bits(ci, False, GS.park, frames=5)
+    for _, bits in _hud_sends(ci, True, GS.park, frames=30):          # button pressed in Park
+      assert (bits[2], bits[4]) == (0, 0)
+    ci = _build(True)
+    _hud_bits(ci, False, GS.drive, frames=5)
+    assert _hud_bits(ci, True, GS.drive, frames=100)[4] == 1          # on-edge in D: toast
+    for _, bits in _hud_sends(ci, True, GS.drive, belt_ok=False, frames=30):   # unbuckled inside the 6 s
+      assert (bits[2], bits[4]) == (0, 0)
+
+  def test_park_press_countdown_runs_hidden_and_shows_only_if_drivable_in_time(self):
+    GS = self.GS
+    ci = _build(True)
+    _hud_bits(ci, False, GS.park, frames=5)
+    _hud_bits(ci, True, GS.park, frames=100)                           # press in Park: hidden
+    assert _hud_bits(ci, True, GS.drive, frames=25)[4] == 1           # into D at 1 s: the rest shows
+    ci = _build(True)
+    _hud_bits(ci, False, GS.park, frames=5)
+    _hud_bits(ci, True, GS.park, frames=LDA_TOAST_FRAMES + 5)          # press in Park, wait out the 6 s
+    assert _hud_bits(ci, True, GS.drive, frames=25)[4] == 0           # a later Park -> Drive shift: no toast
+
+  def test_toast_is_exactly_600_frames_on_the_wire(self):
+    GS = self.GS
+    ci = _build(True)
+    _hud_bits(ci, False, GS.drive, frames=20)                          # on-edge lands on frame 20
+    sends = _hud_sends(ci, True, GS.drive, frames=700)
+    ones = [f for f, b in sends if b[4] == 1]
+    zeros = [f for f, b in sends if b[4] == 0]
+    assert ones[0] == 20 and ones[-1] == 600 and len(ones) == 30       # frames 20..600 every 20
+    assert zeros[0] == 620                                             # 599 or 601 frames would move these
+
+  def test_symbol_and_toast_changes_are_sent_at_once_like_the_camera(self):
+    GS = self.GS
+    ci = _build(True)
+    _hud_bits(ci, False, GS.drive, frames=5)                           # last cadence send at frame 0
+    sends = _hud_sends(ci, True, GS.drive, frames=1)                   # the on-edge is frame 5
+    assert sends and sends[0][0] == 5 and sends[0][1][2] == 1 and sends[0][1][4] == 1
+    sends = _hud_sends(ci, False, GS.drive, frames=1)                  # the off-edge is frame 6
+    assert sends and sends[0][0] == 6 and sends[0][1][2] == 0 and sends[0][1][4] == 0
+    ci = _build(False)                                                 # flag off: cadence only, like upstream
+    _hud_bits(ci, False, GS.drive, frames=5)
+    assert _hud_sends(ci, True, GS.drive, frames=1) == []
+
+  def test_no_toast_from_the_openpilot_engagement_fallback(self):
+    # MADS unavailable: the symbol falls back to CC.enabled, the toast must not (ACC SET is not an LKA press)
+    GS = self.GS
+    ci = _build(True)
+    _hud_bits(ci, False, GS.drive, frames=5, mads_available=False, cc_enabled=False)
+    bits = _hud_bits(ci, False, GS.drive, frames=25, mads_available=False, cc_enabled=True)
+    assert bits[2] == 1 and bits[4] == 0
 
   def test_camera_pulse_is_not_mirrored_and_flag_off_sends_zero(self):
     ci = _build(True)
