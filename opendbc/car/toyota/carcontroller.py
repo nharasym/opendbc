@@ -17,6 +17,13 @@ from opendbc.sunnypilot.car.toyota.values import ToyotaFlagsSP
 
 # HL-FEAT(stock-hud-lat-off): gears in which LTA could actually engage. Park/Reverse/Neutral
 # (and unknown) are not drivable, so the cluster shows LKA OFF there even if the button is on.
+# HL-FEAT(stock-hud-lat-off): the cluster's "Lane Keep Assist ON" toast is LKAS_HUD.LDA_ON_MESSAGE=1.
+# The car's camera raises it for exactly 6.0 s when ITS LTA turns on (20/20 status 0->x edges on
+# route 000000ec), never when it turns off (0/19), and cuts it short if LTA is switched off inside
+# the 6 s. So the toast is driven from OUR on-edge (MADS enabling), not mirrored from the camera:
+# the camera's own LTA state drifts out of phase with MADS whenever a press is missed, and a raw
+# mirror then shows "ON" while the driver is switching LKA off (13 of 15 off-toggles, 2026-10-03).
+LDA_TOAST_FRAMES = 600
 HUD_DRIVABLE_GEARS = (structs.CarState.GearShifter.drive, structs.CarState.GearShifter.eco, structs.CarState.GearShifter.sport,
                       structs.CarState.GearShifter.low, structs.CarState.GearShifter.manumatic, structs.CarState.GearShifter.brake)
 
@@ -68,6 +75,8 @@ class CarController(CarControllerBase, GasInterceptorCarController):
     self.last_torque = 0
     self.last_angle = 0
     self.alert_active = False
+    self.mads_on_prev = None        # HL-FEAT(stock-hud-lat-off): for the toast's on-edge (None = no edge at start)
+    self.lda_toast_frames_left = 0  # ... frames of LDA_ON_MESSAGE=1 still to send
     self.last_standstill = False
     self.standstill_req = False
     self.permit_braking = True
@@ -348,10 +357,19 @@ class CarController(CarControllerBase, GasInterceptorCarController):
       # byte for byte on the wire.
       left_line = hud_control.leftLaneVisible if stock_hud else True
       right_line = hud_control.rightLaneVisible if stock_hud else True
+      # the 6 s "LKA ON" toast: raised on our own on-edge, cut short on the off-edge, like the camera
+      if self.mads_on_prev is not None and mads_on and not self.mads_on_prev:
+        self.lda_toast_frames_left = LDA_TOAST_FRAMES
+      elif not mads_on:
+        self.lda_toast_frames_left = 0
+      self.mads_on_prev = mads_on
+      lda_on_message = 1 if self.lda_toast_frames_left > 0 else 0
+      self.lda_toast_frames_left = max(0, self.lda_toast_frames_left - 1)
       if self.frame % 20 == 0 or send_ui:
         can_sends.append(toyotacan.create_ui_command(self.packer, steer_alert, pcm_cancel_cmd, left_line, right_line,
                                                      hud_control.leftLaneDepart, hud_control.rightLaneDepart, CC.latActive,
-                                                     CS.lkas_hud, stock_hud_when_lat_off=stock_hud, lat_enabled=hud_lat_enabled))
+                                                     CS.lkas_hud, stock_hud_when_lat_off=stock_hud, lat_enabled=hud_lat_enabled,
+                                                     lda_on_message=lda_on_message))
 
       if (self.frame % 100 == 0 or send_ui) and self.CP.flags & ToyotaFlags.DISABLE_RADAR.value:
         can_sends.append(toyotacan.create_fcw_command(self.packer, fcw_alert))
