@@ -6,7 +6,6 @@ no DBC needed and no chance of a bit-layout change masking a logic change.
 from opendbc.car import structs
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.toyota import toyotacan
-from opendbc.car.toyota.carcontroller import LDA_TOAST_FRAMES
 from opendbc.sunnypilot.car.toyota.values import ToyotaFlagsSP
 
 
@@ -21,12 +20,12 @@ class _RecordingPacker:
     return (name, bus, values)
 
 
-def _hud(enabled, flag, left_depart=False, right_depart=False, lat_enabled=None, visible=(True, True), stock_hud=None, pulse=0):
+def _hud(enabled, flag, left_depart=False, right_depart=False, lat_enabled=None, visible=(True, True), stock_hud=None):
   p = _RecordingPacker()
   toyotacan.create_ui_command(p, steer=0, chime=0, left_line=visible[0], right_line=visible[1],
                               left_lane_depart=left_depart, right_lane_depart=right_depart,
                               enabled=enabled, stock_lkas_hud=stock_hud if stock_hud is not None else {},
-                              stock_hud_when_lat_off=flag, lat_enabled=lat_enabled, lda_on_message=pulse)
+                              stock_hud_when_lat_off=flag, lat_enabled=lat_enabled)
   return p.values
 
 
@@ -86,13 +85,11 @@ class TestStockHudWhenLatOff:
     v = _hud(enabled=False, flag=True, lat_enabled=False, visible=(True, True))
     assert (v["LEFT_LINE"], v["RIGHT_LINE"]) == (0, 0)
 
-  def test_toast_pulse_goes_out_as_given_with_the_flag(self):
-    assert _hud(enabled=False, flag=True, lat_enabled=True, pulse=1)["LDA_ON_MESSAGE"] == 1
-    assert _hud(enabled=True, flag=True, lat_enabled=True, pulse=1)["LDA_ON_MESSAGE"] == 1
-    assert _hud(enabled=False, flag=True, lat_enabled=True, pulse=0)["LDA_ON_MESSAGE"] == 0
-    assert _hud(enabled=False, flag=False, pulse=1)["LDA_ON_MESSAGE"] == 0                 # flag off: upstream 0
-    # the camera's own LDA_ON_MESSAGE is never mirrored (its LTA state drifts out of phase with MADS)
-    assert _hud(enabled=False, flag=True, lat_enabled=True, stock_hud=_CAMERA_HUD)["LDA_ON_MESSAGE"] == 0
+  def test_lka_on_popup_is_never_raised(self):
+    # the cluster's "Lane Keep Assist ON" text (LDA_ON_MESSAGE): never, in any state, camera value ignored
+    for enabled, lat_enabled in ((True, True), (False, True), (False, False)):
+      assert _hud(enabled=enabled, flag=True, lat_enabled=lat_enabled, stock_hud=_CAMERA_HUD)["LDA_ON_MESSAGE"] == 0
+    assert _hud(enabled=False, flag=False, stock_hud=_CAMERA_HUD)["LDA_ON_MESSAGE"] == 0
 
   def test_lane_sway_passthrough_is_untouched(self):
     v = _hud(enabled=False, flag=True, lat_enabled=True, stock_hud=dict(_CAMERA_HUD, LANE_SWAY_WARNING=2))
@@ -263,7 +260,7 @@ def _hud_sends(ci, mads_enabled: bool, gear, belt_ok=True, door_closed=True, pbr
 
 
 def _hud_bits(ci, *args, **kwargs):
-  """The last LKAS_HUD's bits over the driven frames (sent every 20 frames, plus on symbol/toast changes)."""
+  """The last LKAS_HUD's bits over the driven frames (sent every 20 frames, plus at once when the symbol changes)."""
   sends = _hud_sends(ci, *args, **kwargs)
   assert sends, "LKAS_HUD was never sent"
   return sends[-1][1]
@@ -337,85 +334,25 @@ class TestLinesThroughTheCarController:
     assert _hud_bits(_build(False), True, self.GS.drive, visible=(False, False))[:4] == (1, 1, 1, 0)
     assert _hud_bits(_build(False), True, self.GS.drive, lat_active=True, visible=(False, True))[:4] == (1, 1, 1, 1)
 
-  def test_toast_fires_on_our_on_edge_for_6_s_and_never_on_the_off_edge(self):
-    # camera behaviour (route 000000ec): pulse on 20/20 LTA-on edges, 0/19 LTA-off edges, 6.0 s long
-    ci = _build(True)
-    _hud_bits(ci, False, self.GS.drive, frames=5)                        # start with LKA off: no edge yet
-    assert _hud_bits(ci, True, self.GS.drive, frames=25)[4] == 1         # on-edge -> toast
-    assert _hud_bits(ci, True, self.GS.drive, frames=LDA_TOAST_FRAMES - 60)[4] == 1   # still on inside 6 s
-    assert _hud_bits(ci, True, self.GS.drive, frames=61)[4] == 0         # ... and gone after 6 s total
-    assert _hud_bits(ci, False, self.GS.drive, frames=25)[4] == 0        # off-edge: no toast
-
-  def test_toast_is_cut_short_when_lka_goes_off_inside_6_s(self):
-    ci = _build(True)
-    _hud_bits(ci, False, self.GS.drive, frames=5)
-    assert _hud_bits(ci, True, self.GS.drive, frames=25)[4] == 1
-    assert _hud_bits(ci, False, self.GS.drive, frames=25)[4] == 0
-    assert _hud_bits(ci, True, self.GS.drive, frames=25)[4] == 1         # a fresh on-edge starts a fresh toast
-
-  def test_no_toast_at_start_when_lka_is_already_on(self):
-    # the camera does not pulse at ignition (status comes up 0 or 1 with pulse 0 on ec/e2/d5)
-    ci = _build(True)
-    assert _hud_bits(ci, True, self.GS.drive, frames=25)[4] == 0
-
-  def test_toast_never_pairs_with_off_bytes(self):
-    # the camera never sends the toast with STATUS 0 (0 of 115 pulse frames on ec+e2); neither do we
-    GS = self.GS
-    ci = _build(True)
-    _hud_bits(ci, False, GS.park, frames=5)
-    for _, bits in _hud_sends(ci, True, GS.park, frames=30):          # button pressed in Park
-      assert (bits[2], bits[4]) == (0, 0)
-    ci = _build(True)
-    _hud_bits(ci, False, GS.drive, frames=5)
-    assert _hud_bits(ci, True, GS.drive, frames=100)[4] == 1          # on-edge in D: toast
-    for _, bits in _hud_sends(ci, True, GS.drive, belt_ok=False, frames=30):   # unbuckled inside the 6 s
-      assert (bits[2], bits[4]) == (0, 0)
-
-  def test_park_press_countdown_runs_hidden_and_shows_only_if_drivable_in_time(self):
-    GS = self.GS
-    ci = _build(True)
-    _hud_bits(ci, False, GS.park, frames=5)
-    _hud_bits(ci, True, GS.park, frames=100)                           # press in Park: hidden
-    assert _hud_bits(ci, True, GS.drive, frames=25)[4] == 1           # into D at 1 s: the rest shows
-    ci = _build(True)
-    _hud_bits(ci, False, GS.park, frames=5)
-    _hud_bits(ci, True, GS.park, frames=LDA_TOAST_FRAMES + 5)          # press in Park, wait out the 6 s
-    assert _hud_bits(ci, True, GS.drive, frames=25)[4] == 0           # a later Park -> Drive shift: no toast
-
-  def test_toast_is_exactly_600_frames_on_the_wire(self):
-    GS = self.GS
-    ci = _build(True)
-    _hud_bits(ci, False, GS.drive, frames=20)                          # on-edge lands on frame 20
-    sends = _hud_sends(ci, True, GS.drive, frames=700)
-    ones = [f for f, b in sends if b[4] == 1]
-    zeros = [f for f, b in sends if b[4] == 0]
-    assert ones[0] == 20 and ones[-1] == 600 and len(ones) == 30       # frames 20..600 every 20
-    assert zeros[0] == 620                                             # 599 or 601 frames would move these
-
-  def test_symbol_and_toast_changes_are_sent_at_once_like_the_camera(self):
+  def test_symbol_changes_are_sent_at_once_like_the_camera(self):
     GS = self.GS
     ci = _build(True)
     _hud_bits(ci, False, GS.drive, frames=5)                           # last cadence send at frame 0
     sends = _hud_sends(ci, True, GS.drive, frames=1)                   # the on-edge is frame 5
-    assert sends and sends[0][0] == 5 and sends[0][1][2] == 1 and sends[0][1][4] == 1
+    assert sends and sends[0][0] == 5 and sends[0][1][2] == 1
     sends = _hud_sends(ci, False, GS.drive, frames=1)                  # the off-edge is frame 6
-    assert sends and sends[0][0] == 6 and sends[0][1][2] == 0 and sends[0][1][4] == 0
+    assert sends and sends[0][0] == 6 and sends[0][1][2] == 0
+    sends = _hud_sends(ci, True, GS.park, frames=1)                    # LKA on but Park: symbol stays off, no send
+    assert sends == []
     ci = _build(False)                                                 # flag off: cadence only, like upstream
     _hud_bits(ci, False, GS.drive, frames=5)
     assert _hud_sends(ci, True, GS.drive, frames=1) == []
 
-  def test_no_toast_from_the_openpilot_engagement_fallback(self):
-    # MADS unavailable: the symbol falls back to CC.enabled, the toast must not (ACC SET is not an LKA press)
+  def test_lka_on_popup_never_reaches_the_wire(self):
     GS = self.GS
-    ci = _build(True)
-    _hud_bits(ci, False, GS.drive, frames=5, mads_available=False, cc_enabled=False)
-    bits = _hud_bits(ci, False, GS.drive, frames=25, mads_available=False, cc_enabled=True)
-    assert bits[2] == 1 and bits[4] == 0
-
-  def test_camera_pulse_is_not_mirrored_and_flag_off_sends_zero(self):
-    ci = _build(True)
-    ci.CS.lkas_hud["LDA_ON_MESSAGE"] = 1
-    assert _hud_bits(ci, False, self.GS.drive, frames=25)[4] == 0
-    ci = _build(False)
-    _hud_bits(ci, False, self.GS.drive, frames=5)
-    assert _hud_bits(ci, True, self.GS.drive, frames=25)[4] == 0        # flag off: upstream 0 even on the edge
+    for flag in (True, False):
+      ci = _build(flag)
+      ci.CS.lkas_hud["LDA_ON_MESSAGE"] = 1                               # camera pulsing: ignored
+      _hud_bits(ci, False, GS.drive, frames=5)
+      for _, bits in _hud_sends(ci, True, GS.drive, frames=700):       # on-edge and 7 s after it
+        assert bits[4] == 0
