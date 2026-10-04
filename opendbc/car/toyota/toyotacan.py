@@ -135,7 +135,7 @@ def create_fcw_command(packer, fcw):
 
 
 def create_ui_command(packer, steer, chime, left_line, right_line, left_lane_depart, right_lane_depart, enabled, stock_lkas_hud,
-                      stock_hud_when_lat_off=False, lat_enabled=None, lda_on_message=0):
+                      stock_hud_when_lat_off=False, lat_enabled=None):
   # HL-FEAT(stock-hud-lat-off): draw the cluster the way the car's own camera does. `enabled` is
   # CC.latActive ("steering right now"; drops at standstill and blinker-pause); `lat_enabled` is
   # "LKA switched on and the car is drivable" (CC_SP.mads.enabled, MADS 'paused' included, gated
@@ -158,9 +158,9 @@ def create_ui_command(packer, steer, chime, left_line, right_line, left_lane_dep
   #   steering             -> lines visible?1:2 / status 2 / bars 1
   #   departure alert      -> that line 3       / status 3   (also with LKA off: openpilot's LDW
   #                                                           keeps running there, by choice)
-  # LDA_ON_MESSAGE is the cluster's 6 s "Lane Keep Assist ON" toast; the carcontroller raises it on
-  # MADS enabling (see LDA_TOAST_FRAMES there). lat_enabled=None (other call sites) means "same as
-  # enabled". Flag off reproduces upstream bit for bit.
+  # LDA_ON_MESSAGE (the cluster's 6 s "Lane Keep Assist ON" pop-up) stays 0 like upstream: Nick
+  # prefers no text (2026-10-03). lat_enabled=None (other call sites) means "same as enabled". Flag
+  # off reproduces upstream bit for bit.
   if lat_enabled is None:
     lat_enabled = enabled
   lta_off = stock_hud_when_lat_off and not lat_enabled
@@ -187,7 +187,7 @@ def create_ui_command(packer, steer, chime, left_line, right_line, left_lane_dep
     "TAKE_CONTROL": 0,
     "LANE_SWAY_SENSITIVITY": 2,
     "LANE_SWAY_TOGGLE": 1,
-    "LDA_ON_MESSAGE": lda_on_message if stock_hud_when_lat_off else 0,  # HL-FEAT(stock-hud-lat-off)
+    "LDA_ON_MESSAGE": 0,
     "LDA_MESSAGES": 0,
     "LDA_SA_TOGGLE": 1,
     "LDA_SENSITIVITY": 2,
