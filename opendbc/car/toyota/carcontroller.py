@@ -20,14 +20,6 @@ from opendbc.sunnypilot.car.toyota.values import ToyotaFlagsSP
 HUD_DRIVABLE_GEARS = (structs.CarState.GearShifter.drive, structs.CarState.GearShifter.eco, structs.CarState.GearShifter.sport,
                       structs.CarState.GearShifter.low, structs.CarState.GearShifter.manumatic, structs.CarState.GearShifter.brake)
 
-# HL-FEAT(stock-hud-lat-off): the cluster's "Lane Keep Assist ON" toast is LKAS_HUD.LDA_ON_MESSAGE=1.
-# The car's camera raises it for exactly 6.0 s when ITS LTA turns on (20/20 status 0->x edges on
-# route 000000ec), never when it turns off (0/19), never at ignition, and cuts it short if LTA is
-# switched off inside the 6 s. So the toast is driven from OUR on-edge (MADS enabling), not
-# mirrored from the camera: the camera's own LTA state drifts out of phase with MADS whenever a
-# press is missed, and a raw mirror then showed "ON" while the driver was switching LKA off
-# (13 of 15 off-toggles, 2026-10-03).
-LDA_TOAST_FRAMES = int(6.0 / DT_CTRL)
 
 Ecu = structs.CarParams.Ecu
 LongCtrlState = structs.CarControl.Actuators.LongControlState
@@ -77,9 +69,7 @@ class CarController(CarControllerBase, GasInterceptorCarController):
     self.last_torque = 0
     self.last_angle = 0
     self.alert_active = False
-    self.mads_on_prev = None        # HL-FEAT(stock-hud-lat-off): for the toast's on-edge (None = no edge at start)
-    self.lda_toast_frames_left = 0  # ... frames of LDA_ON_MESSAGE=1 still to send
-    self.hud_state_sent = None      # ... (lat_enabled, toast) in the last LKAS_HUD we sent; a change sends at once
+    self.hud_lat_enabled_sent = None  # HL-FEAT(stock-hud-lat-off): symbol state in the last LKAS_HUD we sent
     self.last_standstill = False
     self.standstill_req = False
     self.permit_braking = True
@@ -360,28 +350,17 @@ class CarController(CarControllerBase, GasInterceptorCarController):
       # byte for byte on the wire.
       left_line = hud_control.leftLaneVisible if stock_hud else True
       right_line = hud_control.rightLaneVisible if stock_hud else True
-      # the 6 s "LKA ON" toast: the countdown starts on our own on-edge and is cut on the off-edge,
-      # like the camera. Only when MADS is what the button switches (the CC.enabled fallback would
-      # toast on every ACC engagement), and only drawn together with the symbol: the camera never
-      # pairs the toast with OFF bytes, so a press in Park shows nothing until the car is drivable
-      # (the countdown keeps running meanwhile, so a Park -> Drive shift later on does not toast).
-      if CC_SP.mads.available and self.mads_on_prev is not None and mads_on and not self.mads_on_prev:
-        self.lda_toast_frames_left = LDA_TOAST_FRAMES
-      elif not mads_on:
-        self.lda_toast_frames_left = 0
-      self.mads_on_prev = mads_on
-      lda_on_message = 1 if (self.lda_toast_frames_left > 0 and hud_lat_enabled) else 0
-      self.lda_toast_frames_left = max(0, self.lda_toast_frames_left - 1)
-      # the camera sends 0x412 on change; do the same for the symbol and the toast
-      hud_state = (hud_lat_enabled, lda_on_message)
-      if stock_hud and hud_state != self.hud_state_sent:
+      # HL-FEAT(stock-hud-lat-off): the cluster's "Lane Keep Assist ON" pop-up (LDA_ON_MESSAGE) is
+      # deliberately never raised. The camera shows it for 6 s when its own LTA turns on; r28
+      # mirrored that and r29/r30 raised it on our own on-edge, but Nick preferred no text at all
+      # (2026-10-03). The symbol and lines are sent at once when the symbol changes, like the camera.
+      if stock_hud and hud_lat_enabled != self.hud_lat_enabled_sent:
         send_ui = True
       if self.frame % 20 == 0 or send_ui:
-        self.hud_state_sent = hud_state
+        self.hud_lat_enabled_sent = hud_lat_enabled
         can_sends.append(toyotacan.create_ui_command(self.packer, steer_alert, pcm_cancel_cmd, left_line, right_line,
                                                      hud_control.leftLaneDepart, hud_control.rightLaneDepart, CC.latActive,
-                                                     CS.lkas_hud, stock_hud_when_lat_off=stock_hud, lat_enabled=hud_lat_enabled,
-                                                     lda_on_message=lda_on_message))
+                                                     CS.lkas_hud, stock_hud_when_lat_off=stock_hud, lat_enabled=hud_lat_enabled))
 
       if (self.frame % 100 == 0 or send_ui) and self.CP.flags & ToyotaFlags.DISABLE_RADAR.value:
         can_sends.append(toyotacan.create_fcw_command(self.packer, fcw_alert))
