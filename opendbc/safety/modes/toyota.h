@@ -72,13 +72,10 @@ static bool toyota_secoc = false;
 static bool toyota_alt_brake = false;
 static bool toyota_stock_longitudinal = false;
 static bool toyota_lta = false;
-// LDA_ON_MESSAGE is a 2-bit signal; 0xFF marks the change-tracker as unsynced so the
-// first sample after (re)init only establishes a baseline and can never count as a press
-static uint8_t toyota_last_lda_on_message = 0xFFU;
-// the camera autonomously clears LDA_ON_MESSAGE to 0 exactly 6.0s after the last press
-// (measured); a drop to 0 later than this window is that timeout, not a driver press
-#define TOYOTA_LDA_PRESS_WINDOW_US 5500000U
-static uint32_t toyota_last_lda_transition_ts = 0;
+// LKAS_STATUS is a 2-bit signal (0 off, 1 standby, 2 active); 0xFF marks the edge-tracker as
+// unsynced so the first sample after (re)init only establishes a baseline and can never count
+static uint8_t toyota_last_lkas_status = 0xFFU;
+#define TOYOTA_LKAS_STATUS_ACTIVE 2U
 // true while the current MADS_BUTTON_PRESSED pulse was set by the LDA decode below:
 // only pulses we own are auto-cleared on the next rx (externally-set state is not ours)
 static bool toyota_lda_button_pulse = false;
@@ -126,7 +123,7 @@ static int TOYOTA_GET_INTERCEPTOR(const CANPacket_t *msg) {
 
 static void toyota_rx_hook(const CANPacket_t *msg) {
   // a button pulse lasts exactly one processed message: clear it on the next rx of any
-  // address so back-to-back press transitions (every LDA value change is a press) each
+  // address so back-to-back presses (each an LKAS_STATUS edge) each
   // form a distinct rising edge for the MADS layer — without this, the pulse persists
   // until the next 0x412 (~1s) and a rapid second press cannot produce a new edge
   if (toyota_lda_button_pulse && (mads_button_press == MADS_BUTTON_PRESSED)) {
@@ -233,37 +230,36 @@ static void toyota_rx_hook(const CANPacket_t *msg) {
     }
   }
 
-  // MADS: the LDA/LKAS button is wired to the camera, which reports presses via
-  // LKAS_HUD.LDA_ON_MESSAGE. Measured on-car (2023 Highlander): the value toggles
-  // between 0 and 1 on EVERY press (2 never appears), and the camera autonomously
-  // clears it to 0 exactly 6.0s after the last press. So every value CHANGE is one
-  // driver press, EXCEPT a drop to 0 arriving beyond the press window — that is the
-  // camera's timeout, and counting it would phantom-toggle steering 6s after a press.
-  // Mirror each press as a single-message button pulse for the MADS lateral grant.
-  // The first sample after (re)init only sets the baseline (a stale value must not
-  // register as a press; the transition clock starts expired so a stale banner's
-  // timeout drop right after init cannot count either). A press counts regardless of
-  // ACC main: the physical button is fresh driver intent and stock LTA has no
-  // main-cruise requirement (openpilot mirrors this with allow_always); the acc_main
-  // FALLING edge still revokes lateral in the generic MADS layer (master off switch).
-  // openpilot's carstate applies the identical rule — the two layers must stay in
-  // lockstep or the permission layers desync (EPS starvation).
+  // MADS: the LDA/LKAS button is wired to the camera. Measured on-car (2023 Highlander, 2026-10):
+  // the camera's own LKAS_STATUS toggles 0 <-> nonzero on EVERY physical press, while
+  // LDA_ON_MESSAGE (the cluster's 6 s "LKA ON" pulse) rises only on the camera's on-edge and
+  // never on its off-edge. The camera also goes 1 -> 2 by itself ~2.6 s after an on-press at
+  // speed and self-cancels 2 -> 0 ~2 s later; a boot-time 0 -> 1 (LTA remembered on) has no pulse.
+  // So a press is: 0 -> nonzero WITH the pulse (on), or 1 -> 0 (off). 2 -> 0 and 1 <-> 2 are the
+  // camera's own moves. Mirror each press as a single-message button pulse for the MADS lateral
+  // grant. The first sample after (re)init only sets the baseline. A press counts regardless of
+  // ACC main: the physical button is fresh driver intent and stock LTA has no main-cruise
+  // requirement (openpilot mirrors this with allow_always); the acc_main FALLING edge still
+  // revokes lateral in the generic MADS layer (master off switch). openpilot's carstate applies
+  // the identical rule -- the two layers must stay in lockstep or the permission layers desync
+  // (EPS starvation). The previous LDA_ON_MESSAGE-change detector dropped every off-press made
+  // more than 6 s after the on-press and counted self-cancels inside its window as presses.
   if ((msg->bus == 2U) && (msg->addr == 0x412U)) {
+    const uint8_t lkas_status = (uint8_t)((msg->data[0] >> 6U) & 0x3U);
     const uint8_t lda_on_message = (uint8_t)((msg->data[3] >> 6U) & 0x3U);
-    const bool first_sample = (toyota_last_lda_on_message == 0xFFU);
-    const uint32_t ts = microsecond_timer_get();
     bool pressed = false;
-    if (first_sample) {
-      toyota_last_lda_transition_ts = ts - TOYOTA_LDA_PRESS_WINDOW_US;
-    } else if (lda_on_message != toyota_last_lda_on_message) {
-      const uint32_t elapsed = safety_get_ts_elapsed(ts, toyota_last_lda_transition_ts);
-      pressed = (lda_on_message != 0U) || (elapsed < TOYOTA_LDA_PRESS_WINDOW_US);
-      toyota_last_lda_transition_ts = ts;
-    } else {
+    if ((toyota_last_lkas_status != 0xFFU) && (lkas_status != toyota_last_lkas_status)) {
+      // (inside an edge, a previous 0 means the new value is nonzero: the on-edge)
+      if (toyota_last_lkas_status == 0U) {
+        pressed = (lda_on_message != 0U);
+      } else if (lkas_status == 0U) {
+        pressed = (toyota_last_lkas_status != TOYOTA_LKAS_STATUS_ACTIVE);
+      } else {
+      }
     }
     mads_button_press = pressed ? MADS_BUTTON_PRESSED : MADS_BUTTON_NOT_PRESSED;
     toyota_lda_button_pulse = pressed;
-    toyota_last_lda_on_message = lda_on_message;
+    toyota_last_lkas_status = lkas_status;
   }
 }
 
@@ -499,8 +495,7 @@ static safety_config toyota_init(uint16_t param) {
   toyota_dbc_eps_torque_factor = param & TOYOTA_EPS_FACTOR;
 
   // reset MADS button tracking so a stale press cannot carry across a safety mode (re)init
-  toyota_last_lda_on_message = 0xFFU;
-  toyota_last_lda_transition_ts = 0;
+  toyota_last_lkas_status = 0xFFU;
   toyota_lda_button_pulse = false;
   mads_button_press = MADS_BUTTON_UNAVAILABLE;
 
