@@ -19,9 +19,15 @@ SteerControlType = structs.CarParams.SteerControlType
 #     if using the other control command, goes directly to 3 after 1.5 seconds
 # - initializing: LTA can report 0 as long as STEER_TORQUE_SENSOR->STEER_ANGLE_INITIALIZING is 1,
 #     and is a catch-all for LKA
-# LDA_ON_MESSAGE clears itself to 0 exactly 6.0s after the last press (measured);
-# a drop to 0 later than this window is that timeout, not a driver press
-LDA_PRESS_WINDOW_NS = int(5.5e9)
+# LDA/LKAS button (wired to the camera, reported on LKAS_HUD bus 2). Measured on the 2023 Highlander
+# (routes 000000ec/ed/f0/e2, 2026-10-03..05): the camera's own LKAS_STATUS toggles 0 <-> nonzero on
+# EVERY physical press; LDA_ON_MESSAGE (the cluster's 6 s "LKA ON" pulse) rises ONLY on the camera's
+# on-edge (20/20) and never on its off-edge (0/19). The camera also goes 1 -> 2 ("active") by itself
+# ~2.6 s after an on-press at speed and self-cancels 2 -> 0 ~2.0 s later, with no press involved.
+# A boot-time 0 -> 1 (camera becoming ready with LTA remembered on) carries no pulse.
+# The earlier detector keyed on LDA_ON_MESSAGE changes, which silently dropped every off-press made
+# more than 6 s after the on-press and counted self-cancels inside the window as presses.
+LKAS_STATUS_ACTIVE = 2
 
 TEMP_STEER_FAULTS = (0, 9, 11, 21, 25)
 # - lka/lta msg drop out: 3 (recoverable)
@@ -49,8 +55,7 @@ class CarState(CarStateBase, CarStateExt):
     self.accurate_steer_angle_seen = False
     self.angle_offset = FirstOrderFilter(None, 60.0, DT_CTRL, initialized=False)
 
-    self.lkas_button = 0
-    self.lkas_button_transition_ts = 0
+    self.lkas_status: int | None = None  # None = no camera sample yet (the first one is a baseline, never a press)
     self.distance_button = 0
 
     self.pcm_follow_distance = 0
@@ -196,23 +201,23 @@ class CarState(CarStateBase, CarStateExt):
     buttonEvents = []
     prev_distance_button = self.distance_button
     if self.CP.flags & ToyotaFlags.TSS2:
-      # lkas button is wired to the camera
-      prev_lkas_button = self.lkas_button
-      self.lkas_button = cp_cam.vl["LKAS_HUD"]["LDA_ON_MESSAGE"]
-
-      # LDA_ON_MESSAGE toggles between 0 and 1 on EVERY press (measured; it does not
-      # cycle 1<->2), and the camera autonomously clears it to 0 exactly 6.0s after the
-      # last press. Every value change is one press, EXCEPT a drop to 0 beyond the press
-      # window — that's the camera's timeout, and counting it would phantom-toggle
-      # steering 6s after a press. The panda LDA decode applies the identical rule
-      # (toyota.h) — the two layers must stay in lockstep.
-      if self.lkas_button != prev_lkas_button:
-        lda_ts = cp_cam.ts_nanos["LKAS_HUD"]["LDA_ON_MESSAGE"]
-        within_window = (lda_ts - self.lkas_button_transition_ts) < LDA_PRESS_WINDOW_NS
-        if self.lkas_button != 0 or within_window:
-          buttonEvents.extend(create_button_events(1, 0, {1: ButtonType.lkas}) +
-                              create_button_events(0, 1, {1: ButtonType.lkas}))
-        self.lkas_button_transition_ts = lda_ts
+      # lkas button is wired to the camera: a press is an edge of the camera's own LKAS_STATUS
+      # between 0 and nonzero (see the note at the top). The on-edge must carry the LDA_ON_MESSAGE
+      # pulse (a boot-time 0 -> 1 does not); the off-edge must come from standby (1 -> 0), because
+      # 2 -> 0 is the camera cancelling its own active state. The panda applies the identical rule
+      # (toyota.h) -- the two layers must stay in lockstep or the permission layers desync.
+      prev_lkas_status = self.lkas_status
+      self.lkas_status = int(cp_cam.vl["LKAS_HUD"]["LKAS_STATUS"])
+      lda_on_message = int(cp_cam.vl["LKAS_HUD"]["LDA_ON_MESSAGE"])
+      pressed = False
+      if prev_lkas_status is not None and self.lkas_status != prev_lkas_status:
+        if prev_lkas_status == 0:                      # on-edge (the new value is nonzero)
+          pressed = lda_on_message != 0
+        elif self.lkas_status == 0:                    # off-edge, unless from the camera's own active state
+          pressed = prev_lkas_status != LKAS_STATUS_ACTIVE
+      if pressed:
+        buttonEvents.extend(create_button_events(1, 0, {1: ButtonType.lkas}) +
+                            create_button_events(0, 1, {1: ButtonType.lkas}))
 
       if not (self.CP.flags & (ToyotaFlags.RADAR_ACC | ToyotaFlags.SECOC)):
         # distance button is wired to the ACC module (camera or radar)
