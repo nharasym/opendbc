@@ -34,6 +34,10 @@ ACCEL_PID_UNWIND = 0.03 * DT_CTRL * 3  # m/s^2 / frame
 
 MAX_PITCH_COMPENSATION = 1.5  # m/s^2
 
+# HL-FIX(hud-alert-debounce): frames steerRequired must hold before the cluster's 'hold the wheel'
+# pictogram (LDA_ALERT) follows it, in either direction. 0.5 s at the 100 Hz controller rate.
+HUD_STEER_ALERT_DEBOUNCE_FRAMES = int(0.5 / DT_CTRL)
+
 # LKA limits
 # EPS faults if you apply torque while the steering rate is above 100 deg/s for too long
 MAX_STEER_RATE = 100  # deg/s
@@ -69,6 +73,10 @@ class CarController(CarControllerBase, GasInterceptorCarController):
     self.last_torque = 0
     self.last_angle = 0
     self.alert_active = False
+    # HL-FIX(hud-alert-debounce): debounced steerRequired for the cluster's LDA_ALERT
+    self.steer_required_prev = False
+    self.steer_required_frames = 0
+    self.steer_required_shown = False
     self.hud_lat_enabled_sent = None  # HL-FEAT(stock-hud-lat-off): symbol state in the last LKAS_HUD we sent
     self.last_standstill = False
     self.standstill_req = False
@@ -219,7 +227,23 @@ class CarController(CarControllerBase, GasInterceptorCarController):
 
     # handle UI messages
     fcw_alert = hud_control.visualAlert == VisualAlert.fcw
-    steer_alert = hud_control.visualAlert in (VisualAlert.steerRequired, VisualAlert.ldw)
+    # HL-FIX(hud-alert-debounce): steerRequired is mirrored to the cluster as LDA_ALERT, Toyota's 'hold
+    # the wheel' pictogram. Driver monitoring's vision<->wheel-touch policy switch re-raises that alert
+    # on every face-detection flip, and in low sun it flickered at 0.1-0.3 s on / 0.1-0.2 s off (15 blips
+    # on the 2026-10-15 trip; the car's own camera alerted on none of them). The dash must not strobe on
+    # that, so LDA_ALERT follows steerRequired only once it has held for HUD_STEER_ALERT_DEBOUNCE_FRAMES
+    # in the new direction: a sub-0.5 s blip never reaches the cluster, a burst of blips with sub-0.5 s
+    # gaps becomes one steady pictogram, and the real cases (2 s steerTempUnavailableSilent, door open,
+    # saturation, a steady DM prompt) show 0.5 s later and clear 0.5 s later. FCW and the lane-departure
+    # visual stay immediate: short by nature and time-critical.
+    steer_required = hud_control.visualAlert == VisualAlert.steerRequired
+    if steer_required != self.steer_required_prev:
+      self.steer_required_frames = 0
+    self.steer_required_prev = steer_required
+    self.steer_required_frames = min(self.steer_required_frames + 1, HUD_STEER_ALERT_DEBOUNCE_FRAMES)
+    if self.steer_required_frames >= HUD_STEER_ALERT_DEBOUNCE_FRAMES:
+      self.steer_required_shown = steer_required
+    steer_alert = self.steer_required_shown or hud_control.visualAlert == VisualAlert.ldw
     lead = hud_control.leadVisible or CS.out.vEgo < 12.  # at low speed we always assume the lead is present so ACC can be engaged
 
     if self.CP.openpilotLongitudinalControl:
