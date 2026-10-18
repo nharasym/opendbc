@@ -356,3 +356,74 @@ class TestLinesThroughTheCarController:
       _hud_bits(ci, False, GS.drive, frames=5)
       for _, bits in _hud_sends(ci, True, GS.drive, frames=700):       # on-edge and 7 s after it
         assert bits[4] == 0
+
+
+# ---- HL-FIX(hud-alert-debounce): the cluster's 'hold the wheel' pictogram ignores sub-0.5 s blips ----
+
+LKAS_HUD_ADDR = 0x412
+VisualAlert = structs.CarControl.HUDControl.VisualAlert
+DEBOUNCE = 50  # frames at 100 Hz == 0.5 s (carcontroller.HUD_STEER_ALERT_DEBOUNCE_FRAMES)
+
+
+def _alert_sends(ci, pattern):
+  """pattern: [(VisualAlert, frames), ...] driven in order. Returns every LKAS_HUD sent as
+  (controller frame, LDA_ALERT). The controller sends LKAS_HUD at 5 Hz and asap on an alert edge,
+  so the frame of the first send carrying a new value IS the frame the controller changed its mind."""
+  sends = []
+  i = 0
+  for visual, n in pattern:
+    for _ in range(n):
+      CC = structs.CarControl()
+      CC.hudControl.visualAlert = visual
+      frame = ci.CC.frame
+      _, msgs = ci.apply(CC.as_reader(), structs.CarControlSP(), int(i * 0.01 * 1e9))
+      for addr, dat, _ in msgs:
+        if addr == LKAS_HUD_ADDR:
+          sends.append((frame, _sig(dat, 9, 2)))
+      i += 1
+  assert sends, "LKAS_HUD was never sent"
+  return sends
+
+
+def _first(sends, value, after=-1):
+  return min(f for f, a in sends if a == value and f > after)
+
+
+class TestSteerAlertDebounce:
+  def test_the_measured_dm_flicker_never_reaches_the_cluster(self):
+    # 0.2 s on / 0.15 s off, eight times: the trip's 'Touch Steering Wheel' blips
+    sends = _alert_sends(_build(False), [(VisualAlert.steerRequired, 20), (VisualAlert.none, 15)] * 8)
+    assert all(a == 0 for _, a in sends)
+
+  def test_a_steady_alert_shows_after_half_a_second_and_asap(self):
+    sends = _alert_sends(_build(False), [(VisualAlert.steerRequired, 120)])
+    assert _first(sends, 1) == DEBOUNCE - 1  # the frame the debounce completes, not the next 5 Hz slot
+    assert all(a == 1 for f, a in sends if f >= DEBOUNCE - 1)
+
+  def test_the_release_is_debounced_too(self):
+    sends = _alert_sends(_build(False), [(VisualAlert.steerRequired, 100), (VisualAlert.none, 100)])
+    on = _first(sends, 1)
+    assert _first(sends, 0, after=on) == 100 + DEBOUNCE - 1
+    assert all(a == 0 for f, a in sends if f >= 100 + DEBOUNCE - 1)
+
+  def test_a_burst_with_short_gaps_is_one_steady_pictogram(self):
+    # on 0.6 s, off 0.15 s, three times, then off for good: raw edges at 60/75/135/150/210
+    pattern = [(VisualAlert.steerRequired, 60), (VisualAlert.none, 15)] * 3 + [(VisualAlert.none, 100)]
+    sends = _alert_sends(_build(False), pattern)
+    on = _first(sends, 1)
+    assert on == DEBOUNCE - 1
+    assert _first(sends, 0, after=on) == 210 + DEBOUNCE - 1  # the gaps never went out; only the final off did
+
+  def test_a_blip_just_under_the_threshold_is_dropped_and_just_over_shows(self):
+    assert all(a == 0 for _, a in _alert_sends(_build(False), [(VisualAlert.steerRequired, DEBOUNCE - 1), (VisualAlert.none, 100)]))
+    sends = _alert_sends(_build(False), [(VisualAlert.steerRequired, DEBOUNCE), (VisualAlert.none, 100)])
+    assert _first(sends, 1) == DEBOUNCE - 1
+
+  def test_lane_departure_visual_is_immediate(self):
+    sends = _alert_sends(_build(False), [(VisualAlert.none, 7), (VisualAlert.ldw, 10)])
+    assert _first(sends, 1) == 7
+
+  def test_fcw_still_sends_asap_and_never_draws_the_pictogram(self):
+    sends = _alert_sends(_build(False), [(VisualAlert.none, 7), (VisualAlert.fcw, 10)])
+    assert any(f == 7 for f, _ in sends)  # the asap UI send on the FCW edge
+    assert all(a == 0 for _, a in sends)
