@@ -3,6 +3,8 @@
 Uses a recording packer so the assertions are on the signal VALUES, not on packed bytes --
 no DBC needed and no chance of a bit-layout change masking a logic change.
 """
+import unittest
+
 from opendbc.car import structs
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.toyota import toyotacan
@@ -34,7 +36,7 @@ _CAMERA_HUD = {"LANE_SWAY_FLD": 7, "LANE_SWAY_BUZZER": 0, "LANE_SWAY_WARNING": 0
                "LANE_SWAY_SENSITIVITY": 2, "LANE_SWAY_TOGGLE": 1, "LDA_ON_MESSAGE": 1}
 
 
-class TestStockHudWhenLatOff:
+class TestStockHudWhenLatOff(unittest.TestCase):
   def test_flag_off_is_upstream_even_when_not_steering(self):
     v = _hud(enabled=False, flag=False)
     assert (v["LEFT_LINE"], v["RIGHT_LINE"], v["LKAS_STATUS"], v["BARRIERS"]) == (1, 1, 1, 0)
@@ -108,7 +110,7 @@ def _acc(stock_idle, lead=True, permit=True, standstill_req=False, cancel=False,
   return p.values
 
 
-class TestLkaOnButNotSteering:
+class TestLkaOnButNotSteering(unittest.TestCase):
   """Road test 2026-10-02: with LKA on, the symbol and lines vanished at a stop and during a turn
   signal, because CC.latActive drops there. Stock keeps them. lat_enabled carries 'switched on'."""
 
@@ -153,7 +155,7 @@ class TestLkaOnButNotSteering:
     assert (v["LEFT_LINE"], v["RIGHT_LINE"], v["LKAS_STATUS"], v["BARRIERS"]) == (2, 1, 1, 0)
 
 
-class TestStockIdleAccControl:
+class TestStockIdleAccControl(unittest.TestCase):
   def test_default_is_upstream(self):
     v = _acc(stock_idle=False)
     assert (v["MINI_CAR"], v["PERMIT_BRAKING"], v["RELEASE_STANDSTILL"], v["ALLOW_LONG_PRESS"]) == (True, True, True, 1)
@@ -217,7 +219,7 @@ def _acc_bits(ci, enabled: bool, pcm_cruise: bool, frames: int = 8):
   return last
 
 
-class TestStockIdleCallSite:
+class TestStockIdleCallSite(unittest.TestCase):
   def test_flag_off_is_upstream_when_idle(self):
     assert _acc_bits(_build(False), enabled=False, pcm_cruise=False) == (1, 1, 1)
 
@@ -270,7 +272,7 @@ def _hud_status(ci, *args, **kwargs):
   return _hud_bits(ci, *args, **kwargs)[2]
 
 
-class TestHalfWayStateInParkOrUnbuckled:
+class TestHalfWayStateInParkOrUnbuckled(unittest.TestCase):
   """Road test 2026-10-02 photos: LKA button pressed in Park / unbuckled drew the symbol and road
   scene (standby bytes) although nothing could engage. Stock shows OFF there. The symbol must
   follow 'LKA on AND car drivable'."""
@@ -303,7 +305,7 @@ class TestHalfWayStateInParkOrUnbuckled:
     assert _hud_status(_build(False), True, self.GS.drive, depart=True) == 1
 
 
-class TestSymbolColourThroughTheCarController:
+class TestSymbolColourThroughTheCarController(unittest.TestCase):
   """The green/orange symbol states reach the wire from CC.latActive and the LDW flags."""
   GS = structs.CarState.GearShifter
 
@@ -315,7 +317,7 @@ class TestSymbolColourThroughTheCarController:
     assert _hud_status(_build(True), False, self.GS.drive, depart=True) == 3
 
 
-class TestLinesThroughTheCarController:
+class TestLinesThroughTheCarController(unittest.TestCase):
   """hudControl.left/rightLaneVisible reach the wire on the right sides (the call site passes them
   positionally; a swap used to be invisible because both were always True)."""
   GS = structs.CarState.GearShifter
@@ -389,7 +391,7 @@ def _first(sends, value, after=-1):
   return min(f for f, a in sends if a == value and f > after)
 
 
-class TestSteerAlertDebounce:
+class TestSteerAlertDebounce(unittest.TestCase):
   def test_the_measured_dm_flicker_never_reaches_the_cluster(self):
     # 0.2 s on / 0.15 s off, eight times: the trip's 'Touch Steering Wheel' blips
     sends = _alert_sends(_build(False), [(VisualAlert.steerRequired, 20), (VisualAlert.none, 15)] * 8)
