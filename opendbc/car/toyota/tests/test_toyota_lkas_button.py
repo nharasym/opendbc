@@ -4,6 +4,8 @@ Every physical press toggles the camera's own LKAS_STATUS 0 <-> nonzero on LKAS_
 LDA_ON_MESSAGE pulse rises only on the camera's on-edge. The camera also goes 1 -> 2 by itself and
 self-cancels 2 -> 0 without a press. This pins the carstate rule; the panda applies the same one.
 """
+import unittest
+
 from opendbc.car import structs
 from opendbc.car.toyota.carstate import LKAS_STATUS_ACTIVE
 from opendbc.car.toyota.values import DBC, CAR
@@ -38,7 +40,7 @@ class _Harness:
     return presses
 
 
-class TestLkasButtonEdges:
+class TestLkasButtonEdges(unittest.TestCase):
   def test_first_sample_is_a_baseline(self):
     h = _Harness()
     assert h.hud(1, 0) == 0            # camera remembers LTA on at boot: not a press
