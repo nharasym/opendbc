@@ -100,7 +100,14 @@ class TestToyotaSafetyBase(common.CarSafetyTest, common.LongitudinalAccelSafetyT
     return self.packer.make_can_msg_safety(msg, 0, values)
 
   def _ignore_frequency_check_msgs(self):
-    return [self._acc_state_msg(False)] if self.SAFETY_PARAM_SP & ToyotaSafetyFlagsSP.UNSUPPORTED_DSU else []
+    # HL-FIX(lda-button): this fork also exempts the camera's LKAS_HUD (0x412, bus 2) from the
+    # frequency check (event-ish message: the LDA button edges ride on it), so upstream's #536
+    # count test must see it alongside the stock UNSUPPORTED_DSU entry
+    msgs = [self._lkas_hud_msg(0, 0)]
+    if self.SAFETY_PARAM_SP & ToyotaSafetyFlagsSP.UNSUPPORTED_DSU:
+      msgs.append(self._acc_state_msg(False))
+    return msgs
+
   def _lkas_hud_msg(self, status, pulse):
     return self.packer.make_can_msg_safety("LKAS_HUD", 2, {"LKAS_STATUS": status, "LDA_ON_MESSAGE": pulse})
 
