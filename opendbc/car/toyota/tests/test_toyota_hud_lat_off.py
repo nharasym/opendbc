@@ -429,3 +429,19 @@ class TestSteerAlertDebounce(unittest.TestCase):
     sends = _alert_sends(_build(False), [(VisualAlert.none, 7), (VisualAlert.fcw, 10)])
     assert any(f == 7 for f, _ in sends)  # the asap UI send on the FCW edge
     assert all(a == 0 for _, a in sends)
+
+
+class TestToyotaFlagsSPBits(unittest.TestCase):
+  """HL-FEAT(stock-hud-lat-off): upstream took bit 32 for TSS2_SMOOTH (opendbc #440) after this fork had used
+  it for STOCK_HUD_LAT_OFF. IntFlag turns a duplicate value into a silent alias, so the two features would share
+  one bit and the HUD flag would also switch on the smooth-tune PID. Pin every member to its own bit."""
+
+  def test_every_flag_is_a_distinct_power_of_two(self):
+    values = {name: member.value for name, member in ToyotaFlagsSP.__members__.items()}  # aliases included
+    self.assertEqual(len(set(values.values())), len(values), f"duplicate flag bits: {values}")
+    for name, value in values.items():
+      self.assertTrue(value > 0 and value & (value - 1) == 0, f"{name} = {value} is not a single bit")
+
+  def test_stock_hud_lat_off_keeps_its_own_bit(self):
+    self.assertNotEqual(ToyotaFlagsSP.STOCK_HUD_LAT_OFF.value, ToyotaFlagsSP.TSS2_SMOOTH.value)
+    self.assertEqual(ToyotaFlagsSP.STOCK_HUD_LAT_OFF.value, 64)
